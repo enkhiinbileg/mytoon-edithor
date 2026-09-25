@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mlt LC_NUMERIC="C" version="7.0.0" title="CapCut theme test" producer="main_bin">
+  <profile description="HD 1080p 30 fps" width="1920" height="1080" progressive="1"
+           sample_aspect_num="1" sample_aspect_den="1" display_aspect_num="16" display_aspect_den="9"
+           frame_rate_num="30" frame_rate_den="1" colorspace="709"/>
+
+  <playlist id="main_bin">
+    <property name="xml_retain">1</property>
+  </playlist>
+
+  <producer id="black" in="0" out="449">
+    <property name="length">450</property>
+    <property name="eof">pause</property>
+    <property name="resource">0</property>
+    <property name="aspect_ratio">1</property>
+    <property name="mlt_service">color</property>
+    <property name="mlt_image_format">rgba</property>
+    <property name="set.test_audio">0</property>
+  </producer>
+
+  <playlist id="background">
+    <entry producer="black" in="0" out="449"/>
+  </playlist>
+
+  <producer id="producer0" in="0" out="149">
+    <property name="length">150</property>
+    <property name="eof">pause</property>
+    <property name="resource">C:/Users/Gavl/Desktop/my project/VIDEO EDITHOR/testmedia/clip1.mp4</property>
+    <property name="mlt_service">avformat</property>
+    <property name="shotcut:caption">clip1.mp4</property>
+  </producer>
+
+  <producer id="producer1" in="0" out="149">
+    <property name="length">150</property>
+    <property name="eof">pause</property>
+    <property name="resource">C:/Users/Gavl/Desktop/my project/VIDEO EDITHOR/testmedia/clip2.mp4</property>
+    <property name="mlt_service">avformat</property>
+    <property name="shotcut:caption">clip2.mp4</property>
+  </producer>
+
+  <producer id="producer2" in="0" out="149">
+    <property name="length">150</property>
+    <property name="eof">pause</property>
+    <property name="resource">C:/Users/Gavl/Desktop/my project/VIDEO EDITHOR/testmedia/clip3.mp4</property>
+    <property name="mlt_service">avformat</property>
+    <property name="shotcut:caption">clip3.mp4</property>
+  </producer>
+
+  <producer id="producer3" in="0" out="149">
+    <property name="length">150</property>
+    <property name="eof">pause</property>
+    <property name="resource">C:/Users/Gavl/Desktop/my project/VIDEO EDITHOR/testmedia/clip4.mp4</property>
+    <property name="mlt_service">avformat</property>
+    <property name="shotcut:caption">clip4.mp4</property>
+  </producer>
+
+  <producer id="producer4" in="0" out="299">
+    <property name="length">300</property>
+    <property name="eof">pause</property>
+    <property name="resource">C:/Users/Gavl/Desktop/my project/VIDEO EDITHOR/testmedia/music.mp3</property>
+    <property name="mlt_service">avformat</property>
+    <property name="shotcut:caption">music.mp3</property>
+  </producer>
+
+  <playlist id="playlist0">
+    <property name="shotcut:video">1</property>
+    <property name="shotcut:name">V1</property>
+    <entry producer="producer0" in="0" out="149"/>
+    <entry producer="producer1" in="0" out="149"/>
+    <entry producer="producer2" in="0" out="149"/>
+  </playlist>
+
+  <playlist id="playlist1">
+    <property name="shotcut:video">1</property>
+    <property name="shotcut:name">V2</property>
+    <blank length="75"/>
+    <entry producer="producer3" in="0" out="149"/>
+  </playlist>
+
+  <playlist id="playlist2">
+    <property name="shotcut:audio">1</property>
+    <property name="shotcut:name">A1</property>
+    <entry producer="producer4" in="0" out="299"/>
+  </playlist>
+
+  <tractor id="tractor0" title="CapCut theme test" in="0" out="449">
+    <property name="shotcut">1</property>
+    <property name="shotcut:projectAudioChannels">2</property>
+    <track producer="background"/>
+    <track producer="playlist0"/>
+    <track producer="playlist1"/>
+    <track producer="playlist2" hide="video"/>
+
+    <transition id="transition0">
+      <property name="a_track">0</property>
+      <property name="b_track">1</property>
+      <property name="mlt_service">mix</property>
+      <property name="always_active">1</property>
+      <property name="sum">1</property>
+    </transition>
+    <transition id="transition1">
+      <property name="a_track">0</property>
+      <property name="b_track">1</property>
+      <property name="version">0.1</property>
+      <property name="mlt_service">frei0r.cairoblend</property>
+      <property name="threads">0</property>
+      <property name="disable">1</property>
+    </transition>
+
+    <transition id="transition2">
+      <property name="a_track">0</property>
+      <property name="b_track">2</property>
+      <property name="mlt_service">mix</property>
+      <property name="always_active">1</property>
+      <property name="sum">1</property>
+    </transition>
+    <transition id="transition3">
+      <property name="a_track">1</property>
+      <property name="b_track">2</property>
+      <property name="version">0.1</property>
+      <property name="mlt_service">frei0r.cairoblend</property>
+      <property name="threads">0</property>
+    </transition>
+
+    <transition id="transition4">
+      <property name="a_track">0</property>
+      <property name="b_track">3</property>
+      <property name="mlt_service">mix</property>
+      <property name="always_active">1</property>
+      <property name="sum">1</property>
+    </transition>
+  </tractor>
+</mlt>

@@ -1,0 +1,13 @@
+node_modules/
+dist/
+release/
+.test-output/
+runtime-tools/
+scratch/
+*.mp4
+*.wav
+*.bin
+*.zip
+*.exe
+*.dll
+*.log

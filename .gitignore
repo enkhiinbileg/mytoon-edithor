@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build outputs
+dist/
+**/dist/
+release/
+**/release/
+.test-output/
+**/.test-output/
+scratch/
+**/scratch/
+
+# Heavy binaries & AI model weights (exceeds GitHub limits)
+runtime-tools/
+**/runtime-tools/
+*.zip
+*.bin
+*.exe
+*.dll
+
+# Temporary video/audio test files
+capcut-editor/*.mp4
+capcut-editor/*.wav
+
+# External cloned repository
+src-shotcut/
+
+# System & logs
+.DS_Store
+Thumbs.db
+*.log

@@ -1,0 +1,60 @@
+file 'C:\Users\Gavl\Downloads\videoplayback (3).mp4'
+inpoint 0.000
+outpoint 9.360
+file 'C:\Users\Gavl\Downloads\videoplayback (3).mp4'
+inpoint 9.360
+outpoint 18.480
+file 'C:\Users\Gavl\Downloads\videoplayback (3).mp4'
+inpoint 18.480
+outpoint 24.080
+file 'C:\Users\Gavl\Downloads\videoplayback (3).mp4'
+inpoint 24.080
+outpoint 33.920
+file 'C:\Users\Gavl\Downloads\videoplayback (3).mp4'
+inpoint 33.920
+outpoint 43.480
+file 'C:\Users\Gavl\Downloads\videoplayback (3).mp4'
+inpoint 43.480
+outpoint 49.280
+file 'C:\Users\Gavl\Downloads\videoplayback (3).mp4'
+inpoint 49.280
+outpoint 58.360
+file 'C:\Users\Gavl\Downloads\videoplayback (3).mp4'
+inpoint 58.360
+outpoint 68.160
+file 'C:\Users\Gavl\Downloads\videoplayback (3).mp4'
+inpoint 68.160
+outpoint 77.160
+file 'C:\Users\Gavl\Downloads\videoplayback (3).mp4'
+inpoint 77.160
+outpoint 86.480
+file 'C:\Users\Gavl\Downloads\videoplayback (3).mp4'
+inpoint 86.480
+outpoint 89.920
+file 'C:\Users\Gavl\Downloads\videoplayback (3).mp4'
+inpoint 89.920
+outpoint 98.640
+file 'C:\Users\Gavl\Downloads\videoplayback (3).mp4'
+inpoint 98.640
+outpoint 103.200
+file 'C:\Users\Gavl\Downloads\videoplayback (3).mp4'
+inpoint 103.200
+outpoint 112.840
+file 'C:\Users\Gavl\Downloads\videoplayback (3).mp4'
+inpoint 112.840
+outpoint 123.080
+file 'C:\Users\Gavl\Downloads\videoplayback (3).mp4'
+inpoint 123.080
+outpoint 126.960
+file 'C:\Users\Gavl\Downloads\videoplayback (3).mp4'
+inpoint 126.960
+outpoint 136.720
+file 'C:\Users\Gavl\Downloads\videoplayback (3).mp4'
+inpoint 136.720
+outpoint 146.800
+file 'C:\Users\Gavl\Downloads\videoplayback (3).mp4'
+inpoint 146.800
+outpoint 156.600
+file 'C:\Users\Gavl\Downloads\videoplayback (3).mp4'
+inpoint 156.600
+outpoint 166.760
