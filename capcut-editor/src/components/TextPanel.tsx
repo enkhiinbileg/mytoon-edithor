@@ -6,6 +6,7 @@ import { flushDraft } from '../project';
 import type { Clip, RecapCutReport } from '../types';
 import { clipDuration } from '../types';
 import { layoutCaptions } from '../captionLayout';
+import { alignScriptToClips } from '../alignScriptToClips';
 
 function formatTime(secs: number): string {
   const m = Math.floor(secs / 60);
@@ -50,6 +51,45 @@ export default function TextPanel() {
   const [modelDownloading, setModelDownloading] = useState(false);
   const [modelProgress, setModelProgress] = useState(0);
   const [compactCaptions, setCompactCaptions] = useState(true);
+  const [showScriptFixModal, setShowScriptFixModal] = useState(false);
+  const [scriptFixText, setScriptFixText] = useState('');
+  const [fixToast, setFixToast] = useState('');
+
+  const handleApplyScriptToCaptions = async () => {
+    const text = scriptFixText.trim() || captionScript.trim();
+    if (!text) {
+      alert('Монгол скрипт текстээ оруулна уу.');
+      return;
+    }
+    if (!captionClips.length) {
+      alert('Таймлайн дээр засах хадмал алга байна.');
+      return;
+    }
+
+    const fixed = alignScriptToClips(text, captionClips);
+    const fixedMap = new Map(fixed.map(c => [c.id, c.style?.text || c.text || '']));
+
+    useEditor.setState(s => ({
+      clips: s.clips.map(c => {
+        if (fixedMap.has(c.id) && c.style) {
+          return {
+            ...c,
+            style: { ...c.style, text: fixedMap.get(c.id)! }
+          };
+        }
+        return c;
+      })
+    }));
+
+    const updated = useEditor.getState();
+    if (updated.currentProjectId) {
+      await window.api.autosaveProjectById(updated.currentProjectId, updated.snapshotProject(), { duration: updated.duration() });
+    }
+
+    setShowScriptFixModal(false);
+    setFixToast(`✅ ${fixed.length} хадмалын үгийг скриптээр амжилттай заслаа!`);
+    setTimeout(() => setFixToast(''), 4000);
+  };
   useEffect(() => {
     window.api.whisperStatus().then(status => {
       setCaptionModels(status.models);
@@ -436,16 +476,35 @@ export default function TextPanel() {
               <div style={{ background: '#1c1c22', padding: 10, borderRadius: 8, border: '1px solid rgba(255,255,255,0.06)' }}>
                 <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--accent)', marginBottom: 6, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span>⚡ БҮХ ХАДМАЛД ХЭВ ЗАГВАР ХЭРЭГЛЭХ</span>
-                  <button
-                    type="button"
-                    className="btn ghost"
-                    style={{ fontSize: 10, padding: '2px 6px', color: '#10b981' }}
-                    onClick={exportSrt}
-                    title="Бүх хадмалыг .srt файл хэлбэрээр татаж авах"
-                  >
-                    📥 .SRT татах
-                  </button>
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                    <button
+                      type="button"
+                      className="btn primary"
+                      style={{ fontSize: 10, padding: '2px 8px', background: '#3b82f6', color: '#fff', fontWeight: 700, borderRadius: 4, display: 'flex', alignItems: 'center', gap: 4 }}
+                      onClick={() => {
+                        setScriptFixText(captionScript || '');
+                        setShowScriptFixModal(true);
+                      }}
+                      title="Таймлайн дээрх хадмалын үг үсгийн алдааг зөв Монгол скриптээр 100% засах"
+                    >
+                      <span>✨</span> Скриптээр засах
+                    </button>
+                    <button
+                      type="button"
+                      className="btn ghost"
+                      style={{ fontSize: 10, padding: '2px 6px', color: '#10b981' }}
+                      onClick={exportSrt}
+                      title="Бүх хадмалыг .srt файл хэлбэрээр татаж авах"
+                    >
+                      📥 .SRT татах
+                    </button>
+                  </div>
                 </div>
+                {fixToast && (
+                  <div style={{ background: 'rgba(16, 185, 129, 0.2)', border: '1px solid #10b981', color: '#34d399', padding: '6px 10px', borderRadius: 6, fontSize: 11, marginBottom: 6, fontWeight: 600 }}>
+                    {fixToast}
+                  </div>
+                )}
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 4 }}>
                   <button
                     type="button"
@@ -837,6 +896,39 @@ export default function TextPanel() {
           </div>
         )}
       </div>
+
+      {showScriptFixModal && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.75)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ background: '#1c1c24', border: '1px solid #3f3f46', borderRadius: 12, padding: 22, width: 560, maxWidth: '92vw', color: '#f4f4f5', boxShadow: '0 25px 50px rgba(0,0,0,0.6)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <div style={{ fontSize: 16, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span>✨</span> Хадмалыг Скриптээр алдаагүй засах
+              </div>
+              <button className="btn ghost" style={{ fontSize: 16, padding: '2px 8px' }} onClick={() => setShowScriptFixModal(false)}>✕</button>
+            </div>
+            <p style={{ fontSize: 12, color: '#a1a1aa', margin: '0 0 12px', lineHeight: 1.5 }}>
+              Таймлайн дээрх хадмалын аудиотой таарсан <strong>миллисекундын цагийг хэвээр хадгалж</strong>, үг үсгийн бүх алдааг таны Монгол скриптийн зөв үгсээр автоматаар сольно.
+            </p>
+            <textarea
+              value={scriptFixText}
+              onChange={e => setScriptFixText(e.target.value)}
+              placeholder="Зөв бичсэн Монгол зохиол/скриптээ энд хуулж тавина уу..."
+              rows={8}
+              style={{ width: '100%', boxSizing: 'border-box', background: '#111115', border: '1px solid #52525b', borderRadius: 8, padding: 12, color: '#fff', fontSize: 12, lineHeight: 1.6, resize: 'vertical', marginBottom: 14 }}
+            />
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button className="btn ghost" onClick={() => setShowScriptFixModal(false)}>Цуцлах</button>
+              <button
+                className="btn primary"
+                style={{ background: '#10b981', color: '#fff', fontWeight: 700, padding: '8px 16px', borderRadius: 6 }}
+                onClick={handleApplyScriptToCaptions}
+              >
+                🚀 Алдааг 100% засаж солих
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
