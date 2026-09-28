@@ -519,7 +519,7 @@ async function syncTimelineVoice(spec, progress) {
             speechSegments: chunkSegs,
             keyframes: chunkKeyframes,
             apiKey,
-            model: spec.geminiModel || 'gemini-2.0-flash'
+            model: spec.geminiModel || 'gemini-3.6-flash'
           });
           if (matches && matches.length) {
             chunkMatches = matches;

@@ -177,7 +177,7 @@ async function syncTimelineWithSrt(spec, progress) {
       mongolianSegments,
       englishSrt,
       apiKey,
-      model: spec.geminiModel || 'gemini-3.1-flash-lite'
+      model: spec.geminiModel || 'gemini-3.6-flash'
     });
   } else {
     // When no distinct Mongolian script text is available, the reconstructed English SRT scenes

@@ -90,7 +90,7 @@ async function buildScriptRecap(spec, progress) {
     speed = 1.0,
     videoPath,
     sourceOffset = 0,
-    geminiModel = 'gemini-2.5-flash',
+    geminiModel = 'gemini-3.6-flash',
     mode = 'hybrid', // 'hybrid' (Хөдөлгөөнтэй үед Cut + дуу үргэлжлэхэд Freeze) | 'freeze' | 'cut' | 'audio_only'
     audioOnly = false,
     useVision = false, // Rule 1: false by default

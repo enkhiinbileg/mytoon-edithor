@@ -81,7 +81,7 @@ function alignProportional(mongolianSegments, englishSrt) {
  * Semantic Alignment via Gemini AI.
  * Processes in manageable windows (e.g. 20-35 segments per call) to fit prompt tokens and ensure 100% accuracy.
  */
-async function alignWithGemini({ mongolianSegments, englishSrt, apiKey, model = 'gemini-3.1-flash-lite' }) {
+async function alignWithGemini({ mongolianSegments, englishSrt, apiKey, model = 'gemini-3.6-flash' }) {
   if (!apiKey) return alignProportional(mongolianSegments, englishSrt);
   if (!mongolianSegments.length || !englishSrt.length) return [];
 
@@ -130,7 +130,7 @@ CRITICAL RULES:
   ]
 }`;
 
-    const candidates = [model, 'gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-2.0-flash'].filter(Boolean);
+    const candidates = [model, 'gemini-3.6-flash', 'gemini-flash-latest', 'gemini-2.5-flash', 'gemini-3.5-flash'].filter(Boolean);
     let batchMatches = null;
 
     for (const candidate of candidates) {

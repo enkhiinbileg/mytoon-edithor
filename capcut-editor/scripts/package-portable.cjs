@@ -35,6 +35,9 @@ const appDir = path.join(output,'resources','app');
     fs.copyFileSync(path.join(root, 'capcut_auto_captions.json'), path.join(appDir, 'capcut_auto_captions.json'));
     fs.copyFileSync(path.join(root, 'capcut_auto_captions.json'), path.join(output, 'resources', 'capcut_auto_captions.json'));
   }
+  if (fs.existsSync(path.join(root, 'groq_key.txt'))) {
+    fs.copyFileSync(path.join(root, 'groq_key.txt'), path.join(appDir, 'groq_key.txt'));
+  }
   fs.writeFileSync(path.join(appDir,'package.json'),JSON.stringify({name:'capcut-editor',productName:'Cutline',version:'0.2.0',main:'electron/main.js'},null,2));
   try {
     fs.copyFileSync(path.join(output,'electron.exe'),path.join(output,'Cutline.exe'));

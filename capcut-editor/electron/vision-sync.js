@@ -153,7 +153,7 @@ async function transcribeVoiceWithGemini({ voicePath, apiKey, startOffset = 0, d
     const audioBase64 = audioBuf.toString('base64');
     try { fs.unlinkSync(tmpMp3); } catch {}
 
-    const candidates = ['gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-3.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+    const candidates = ['gemini-3.6-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite', 'gemini-3.5-flash', 'gemini-2.5-flash'];
 
     const parts = [
       {
@@ -318,7 +318,7 @@ Return a JSON object with this EXACT structure:
   if (model && !/2\.5/i.test(model)) candidates.push(model.replace(/^models\//, ''));
 
   // Prioritize modern fast vision models
-  const preferred = ['gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-3.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+  const preferred = ['gemini-3.6-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite', 'gemini-3.5-flash', 'gemini-2.5-flash'];
   for (const p of preferred) {
     if (!candidates.includes(p)) candidates.push(p);
   }
