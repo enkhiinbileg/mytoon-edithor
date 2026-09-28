@@ -26,6 +26,7 @@ interface EditorState {
   endGesture(): void;
   duplicateClip(id: string): void;
   snapshotProject(): ProjectDocument;
+  applyRecapCut(newMedia: MediaItem[], videoClips: Clip[]): void;
   loadProject(data: ProjectDocument, path?: string | null, projectId?: string | null): void;
   setCurrentProjectId(id: string | null): void;
   newProject(): void;
@@ -251,6 +252,19 @@ export const useEditor = create<EditorState>((rawSet, get) => {
   snapshotProject: () => {
     const s = get();
     return { format: 'cutline-project', version: 1, name: s.projectName, media: s.media, tracks: s.tracks, clips: s.clips, settings: s.projectSettings };
+  },
+  applyRecapCut: (newMedia, videoClips) => {
+    const s = get();
+    if (s.tracks.find(t => t.id === 'v1')?.locked) throw new Error('V1 дүрсний зам түгжээтэй байна.');
+    const mediaById = new Map(s.media.map(m => [m.id, m]));
+    for (const m of newMedia) mediaById.set(m.id, m);
+    set({
+      media: [...mediaById.values()],
+      clips: [...s.clips.filter(c => c.trackId !== 'v1'), ...videoClips],
+      selectedClipId: null,
+      selectedClipIds: [],
+      isPlaying: false
+    });
   },
   currentProjectId: null,
   setCurrentProjectId: (id: string | null) => rawSet({ currentProjectId: id }),

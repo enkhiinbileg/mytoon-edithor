@@ -31,3 +31,7 @@ src-shotcut/
 .DS_Store
 Thumbs.db
 *.log
+*key*.txt
+groq_key.txt
+backup/autocut-before-fix/
+capcut-editor/repaired-projects/

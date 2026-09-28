@@ -11,3 +11,5 @@ scratch/
 *.exe
 *.dll
 *.log
+*key*.txt
+groq_key.txt

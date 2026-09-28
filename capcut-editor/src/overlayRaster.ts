@@ -47,7 +47,7 @@ function wrapText(text: string, maxCharsPerLine = 34): string[] {
   return result.length > 0 ? result : [text];
 }
 
-export function rasterizeOverlay(clip: Clip, scale: number): { dataUrl: string; w: number; h: number } | null {
+export function rasterizeOverlay(clip: Clip, scale: number, encode = true): { dataUrl: string; w: number; h: number; canvas: HTMLCanvasElement } | null {
   const st = clip.style;
   if (!st || !st.text) return null;
 
@@ -121,23 +121,103 @@ export function rasterizeOverlay(clip: Clip, scale: number): { dataUrl: string; 
     ctx.fillText(line, w / 2, baseY + i * lineHeight);
   });
 
-  return { dataUrl: canvas.toDataURL('image/png'), w, h };
+  return { dataUrl: encode ? canvas.toDataURL('image/png') : '', w, h, canvas };
+}
+
+export interface OverlayPreparation {
+  signal?: AbortSignal;
+  onProgress?: (completed: number, total: number) => void;
+}
+
+/** Async PNG encoding lets the window paint and respond to Cancel between captions. */
+async function encodeCanvas(canvas: HTMLCanvasElement, signal?: AbortSignal): Promise<string> {
+  signal?.throwIfAborted();
+  const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob(
+    value => value ? resolve(value) : reject(new Error('Cannot encode caption image.')), 'image/png'));
+  signal?.throwIfAborted();
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error || new Error('Cannot read caption image.'));
+    reader.readAsDataURL(blob);
+  });
+  signal?.throwIfAborted();
+  return dataUrl;
+}
+
+/** Compose caption changes into one nonoverlapping transparent image sequence.
+ * This preserves the renderer's font, wrapping, shadows and stacking, while
+ * avoiding thousands of simultaneous image inputs in the export process.
+ */
+async function buildCompositeOverlays(clips: Clip[], outW: number, outH: number, preparation: OverlayPreparation): Promise<OverlayImage[]> {
+  const events = new Map<number, { starts: number[]; ends: number[] }>();
+  const add = (time: number, kind: 'starts' | 'ends', index: number) => {
+    const event = events.get(time) ?? { starts: [], ends: [] };
+    event[kind].push(index);
+    events.set(time, event);
+  };
+  clips.forEach((clip, index) => {
+    const start = Math.max(0, clip.start), end = clipEnd(clip);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return;
+    add(start, 'starts', index);
+    add(end, 'ends', index);
+  });
+  const times = [...events.keys()].sort((a, b) => a - b);
+  const canvas = document.createElement('canvas');
+  canvas.width = outW;
+  canvas.height = outH;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('Cannot prepare caption images for export.');
+  const active = new Map<number, NonNullable<ReturnType<typeof rasterizeOverlay>>>();
+  const output: OverlayImage[] = [];
+  let completed = 0;
+  for (let index = 0; index + 1 < times.length; index += 1) {
+    preparation.signal?.throwIfAborted();
+    const time = times[index], event = events.get(time)!;
+    for (const clipIndex of event.ends) active.delete(clipIndex);
+    for (const clipIndex of event.starts) {
+      const image = rasterizeOverlay(clips[clipIndex], outH / REF_H, false);
+      if (image) active.set(clipIndex, image);
+      completed++;
+    }
+    if (!active.size) continue;
+    context.clearRect(0, 0, outW, outH);
+    // Keep the original overlay stacking order when captions/stickers overlap.
+    for (const clipIndex of [...active.keys()].sort((a, b) => a - b)) {
+      const clip = clips[clipIndex], image = active.get(clipIndex)!;
+      context.globalAlpha = clip.opacity ?? 1;
+      context.drawImage(image.canvas,
+        Math.round((clip.x ?? 0.5) * outW - image.w / 2),
+        Math.round((clip.y ?? 0.5) * outH - image.h / 2));
+    }
+    context.globalAlpha = 1;
+    output.push({ dataUrl: await encodeCanvas(canvas, preparation.signal), start: time, end: times[index + 1],
+      x: 0, y: 0, w: outW, h: outH, opacity: 1 });
+    preparation.onProgress?.(completed, clips.length);
+  }
+  return output;
 }
 
 /** Turn every overlay clip into a positioned image for the export pipeline. */
-export function buildOverlays(clips: Clip[], outW: number, outH: number): OverlayImage[] {
+export async function buildOverlays(clips: Clip[], outW: number, outH: number, preparation: OverlayPreparation = {}): Promise<OverlayImage[]> {
+  const overlayClips = clips.filter((clip) => (clip.kind === 'text' || clip.kind === 'sticker') && clip.style?.text);
+  preparation.onProgress?.(0, overlayClips.length);
+  // Paint the initial preparation state before measuring/rasterizing any text.
+  await new Promise<void>(resolve => setTimeout(resolve, 0));
+  preparation.signal?.throwIfAborted();
+  if (overlayClips.length > 32) return buildCompositeOverlays(overlayClips, outW, outH, preparation);
   const scale = outH / REF_H;
   const out: OverlayImage[] = [];
 
-  for (const c of clips) {
-    if (c.kind !== 'text' && c.kind !== 'sticker') continue;
-    const img = rasterizeOverlay(c, scale);
+  for (const c of overlayClips) {
+    preparation.signal?.throwIfAborted();
+    const img = rasterizeOverlay(c, scale, false);
     if (!img) continue;
 
     const cx = (c.x ?? 0.5) * outW;
     const cy = (c.y ?? 0.5) * outH;
     out.push({
-      dataUrl: img.dataUrl,
+      dataUrl: await encodeCanvas(img.canvas, preparation.signal),
       start: c.start,
       end: clipEnd(c),
       x: Math.round(cx - img.w / 2),
@@ -146,6 +226,7 @@ export function buildOverlays(clips: Clip[], outW: number, outH: number): Overla
       h: img.h,
       opacity: c.opacity ?? 1
     });
+    preparation.onProgress?.(out.length, overlayClips.length);
   }
   return out;
 }

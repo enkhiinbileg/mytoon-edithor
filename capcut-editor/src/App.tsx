@@ -203,17 +203,22 @@ export default function App() {
           start: Math.max(0, c.start - minStart)
         }));
 
-      const overlays = buildOverlays(shiftedOverlayClips, width, height);
-
       const isMp3 = options.format === 'mp3' || options.format === 'wav' || options.format === 'aac' || options.exportVideo === false;
+      setExportError(null);
+      setExportPct(0);
+      const overlays = isMp3 ? [] : await buildOverlays(shiftedOverlayClips, width, height, {
+        signal: options.signal, onProgress: options.onPreparationProgress
+      });
+      options.signal?.throwIfAborted();
       const defaultExt = options.format === 'mov' ? '.mov' : (options.format === 'mp3' ? '.mp3' : (options.format === 'wav' ? '.wav' : (options.format === 'aac' ? '.aac' : '.mp4')));
       const outPath = options.outPath || await window.api.saveExportDialog(
         options.name.replace(/[<>:"/\\|?*]/g, '_') + defaultExt
       );
-      if (!outPath) return { ok: false, error: 'Canceled' };
+      if (!outPath) { setExportPct(null); return { ok: false, error: 'Canceled' }; }
 
       setExportError(null);
       setExportPct(0);
+      options.signal?.throwIfAborted();
 
       const res = await window.api.runExport({
         clips,
@@ -234,6 +239,7 @@ export default function App() {
       });
 
       setExportPct(null);
+      if (options.signal?.aborted) return { ok: false, error: 'Canceled' };
       if (res.ok) {
         setDoneMsg(`Exported to ${res.path}`);
         setTimeout(() => setDoneMsg(null), 6000);
@@ -243,6 +249,7 @@ export default function App() {
       return res;
     } catch (e) {
       setExportPct(null);
+      if (options.signal?.aborted) return { ok: false, error: 'Canceled' };
       const errMsg = e instanceof Error ? e.message : String(e);
       setExportError(errMsg);
       return { ok: false, error: errMsg };

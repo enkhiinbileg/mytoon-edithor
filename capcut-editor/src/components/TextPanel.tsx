@@ -1,10 +1,11 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useRef, useEffect } from 'react';
 import { useEditor } from '../store';
 import { TEXT_PRESETS } from '../looks';
 import { useFonts } from '../fontManager';
 import { flushDraft } from '../project';
-import type { Clip } from '../types';
+import type { Clip, RecapCutReport } from '../types';
 import { clipDuration } from '../types';
+import { layoutCaptions } from '../captionLayout';
 
 function formatTime(secs: number): string {
   const m = Math.floor(secs / 60);
@@ -28,7 +29,7 @@ export default function TextPanel() {
   // Filter subtitle clips (track ov1 or kind text)
   const captionClips = useMemo(() => {
     return clips
-      .filter((c) => c.trackId === 'ov1' || c.kind === 'text')
+      .filter((c) => c.kind === 'text')
       .sort((a, b) => a.start - b.start);
   }, [clips]);
 
@@ -43,17 +44,49 @@ export default function TextPanel() {
   const [searchQuery, setSearchQuery] = useState('');
   const [generating, setGenerating] = useState(false);
   const [genStatus, setGenStatus] = useState('');
+  const [captionScript, setCaptionScript] = useState('');
+  const [captionModels, setCaptionModels] = useState<{id:string;label:string;mb:number;installed:boolean}[]>([]);
+  const [captionModel, setCaptionModel] = useState('groq-whisper-large-v3');
+  const [modelDownloading, setModelDownloading] = useState(false);
+  const [modelProgress, setModelProgress] = useState(0);
+  const [compactCaptions, setCompactCaptions] = useState(true);
+  useEffect(() => {
+    window.api.whisperStatus().then(status => {
+      setCaptionModels(status.models);
+      const groq = status.models.find(m => m.id.startsWith('groq') && m.installed);
+      const best = groq || [...status.models].reverse().find(m => m.installed);
+      if (best) setCaptionModel(best.id);
+    }).catch(() => {});
+  }, []);
+  const installCaptionModel = async () => {
+    setModelDownloading(true); setModelProgress(0);
+    const off = window.api.onWhisperProgress(p => { if (p.model === captionModel) setModelProgress(p.pct); });
+    try {
+      await window.api.downloadWhisperModel(captionModel);
+      setCaptionModels((await window.api.whisperStatus()).models);
+    } catch (error: any) { alert(error.message || String(error)); }
+    finally { off(); setModelDownloading(false); }
+  };
 
   // Recap Auto-Cut state
-  const [srtPath, setSrtPath] = useState<string>(
-    'C:/Users/Gavl/Downloads/[English (auto-generated)] When a Top Assassin Is Reborn as a Schoolboy! - Manhwa Recap [DownSub.com].srt'
-  );
-  const [srtFileName, setSrtFileName] = useState<string>(
-    '[English (auto-generated)] When a Top Assassin Is Reborn...srt'
-  );
+  const [srtPath, setSrtPath] = useState('');
+  const [srtFileName, setSrtFileName] = useState('');
   const [autoCutting, setAutoCutting] = useState<boolean>(false);
   const [autoCutStatus, setAutoCutStatus] = useState<string>('');
   const [autoCutSuccess, setAutoCutSuccess] = useState<string>('');
+  const [autoCutError, setAutoCutError] = useState('');
+  const [autoCutReport, setAutoCutReport] = useState<RecapCutReport | null>(null);
+  const autoCutBusy = useRef(false);
+  const resultClips = useRef<Clip[] | null>(null);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => {
+    if (resultClips.current && resultClips.current !== clips) {
+      resultClips.current = null;
+      setAutoCutReport(null);
+      setAutoCutSuccess('');
+    }
+  }, [clips]);
   const [sceneSearch, setSceneSearch] = useState<string>('');
 
   const filteredScenes = useMemo(() => {
@@ -74,6 +107,8 @@ export default function TextPanel() {
       if (res && res.ok && res.path) {
         setSrtPath(res.path);
         setSrtFileName(res.name || 'English.srt');
+        setAutoCutReport(null);
+        setAutoCutError('');
         setAutoCutSuccess(`Сонгогдсон: ${res.name} (${res.entriesCount} мөр хадмал)`);
       }
     } catch (err: any) {
@@ -82,40 +117,56 @@ export default function TextPanel() {
   };
 
   const handleAutoCutBySrt = async () => {
+    if (autoCutBusy.current || !srtPath) return;
+    autoCutBusy.current = true;
     setAutoCutting(true);
     setAutoCutStatus('🔍 Англи SRT файлыг задалж байна...');
     setAutoCutSuccess('');
+    setAutoCutReport(null);
+    setAutoCutError('');
+    let unsub: (() => void) | undefined;
+    const original = useEditor.getState();
+    const projectDoc = original.snapshotProject();
+    const fingerprint = JSON.stringify(projectDoc);
+    const requestId = crypto.randomUUID();
+    let applied = false;
 
     try {
-      const unsub = window.api.onRecapCutProgress?.((p) => {
-        if (p?.message) setAutoCutStatus(p.message);
+      unsub = window.api.onRecapCutProgress?.((p) => {
+        if (mounted.current && p?.requestId === requestId && p.message) setAutoCutStatus(p.message);
       });
 
-      const projectDoc = useEditor.getState().snapshotProject();
       const res = await window.api.autoCutBySrt({
         srtPath,
         captions: captionClips,
-        projectData: projectDoc
+        projectData: projectDoc,
+        requestId
       });
 
-      unsub?.();
-
-      if (!res || !res.ok || !res.videoClips || res.videoClips.length === 0) {
-        throw new Error(res?.error || 'Дүрс тайралт амжилтгүй боллоо.');
+      if (!res.ok) throw new Error(res.error || 'Дүрс тайралт амжилтгүй боллоо.');
+      if (!res.videoClips.length || !res.report || res.report.matchedCaptionCount !== captionClips.length || Math.abs(res.report.durationError) > 0.000001) throw new Error('Тааруулалтын эцсийн шалгалт амжилтгүй.');
+      const current = useEditor.getState();
+      if (!mounted.current) return;
+      if (current.currentProjectId !== original.currentProjectId || current.projectPath !== original.projectPath || JSON.stringify(current.snapshotProject()) !== fingerprint) throw new Error('Тааруулалтын явцад төсөл өөрчлөгдсөн. Шинэ timeline дээр дахин ажиллуулна уу.');
+      current.applyRecapCut(res.newMedia, res.videoClips);
+      applied = true;
+      const updated = useEditor.getState();
+      resultClips.current = updated.clips;
+      if (updated.currentProjectId) {
+        const saved = await window.api.autosaveProjectById(updated.currentProjectId, updated.snapshotProject(), { duration: updated.duration() });
+        if (!saved.ok) throw new Error(saved.error || 'Төслийг хадгалж чадсангүй.');
       }
-
-      // Replace clips on v1 with the generated video clips
-      const otherClips = useEditor.getState().clips.filter((c) => c.trackId !== 'v1');
-      useEditor.setState({ clips: [...otherClips, ...res.videoClips] });
       await flushDraft();
-
-      setAutoCutSuccess(`🎉 ${res.videoClips.length} үзэгдэл Монгол ярианы цагт яг таарч амжилттай тайрагдлаа!`);
+      if (mounted.current && useEditor.getState().clips === updated.clips) {
+        setAutoCutReport(res.report);
+        setAutoCutSuccess(`${res.report.matchedCaptionCount}/${res.report.captionCount} хадмал холбогдлоо. ${res.motionCount} дүрс + ${res.freezeCount} царцсан зураг. Хугацааны зөрүү: ${(Math.abs(res.report.durationError) * 1000).toFixed(1)} мс.`);
+      }
     } catch (err: any) {
-      console.error(err);
-      alert('Алдаа: ' + (err.message || String(err)));
+      if (mounted.current) setAutoCutError((applied ? 'Дүрс timeline-д орсон ч хадгалалт амжилтгүй. Ctrl+S-ээр хадгалж болно. ' : '') + (err.message || String(err)));
     } finally {
-      setAutoCutting(false);
-      setAutoCutStatus('');
+      unsub?.();
+      autoCutBusy.current = false;
+      if (mounted.current) { setAutoCutting(false); setAutoCutStatus(''); }
     }
   };
 
@@ -127,6 +178,10 @@ export default function TextPanel() {
 
   // CapCut 1-Click Auto Caption Generator
   const handleOneClickAutoCaption = async () => {
+    const startingClips = useEditor.getState().clips;
+    const unsubscribe = window.api.onVoiceAlignProgress(p => {
+      setGenStatus(`${typeof p.pct === 'number' ? Math.round(p.pct) + '% · ' : ''}${p.message || 'Яриаг таньж байна...'}`);
+    });
     setGenerating(true);
     setGenStatus('🎙️ Аудиог уншиж байна...');
 
@@ -142,15 +197,17 @@ export default function TextPanel() {
       const audioPath = targetMedia?.path || '';
 
       // 2. Call backend alignment engine
-      setGenStatus('⚡ Долгионы амьсгаа авах зайг тооцоолж байна...');
+      if (!audioPath) throw new Error('Эхлээд аудио файл оруулна уу.');
+      setGenStatus('🎙️ Монгол яриаг таньж хадмал үүсгэж байна...');
       const res = await window.api.alignAudioScript({
         audioPath,
-        scriptText: '',
+        whisperModel: captionModel,
+        scriptText: captionScript.trim(),
         srtPath: '',
         minSilence: 0.22,
         noise: '-30dB',
-        useWhisper: false,
-        mode: 'auto'
+        useWhisper: true,
+        mode: captionScript.trim() ? 'script_captions' : 'auto'
       });
 
       if (!res || !res.ok || !res.segments || res.segments.length === 0) {
@@ -158,6 +215,7 @@ export default function TextPanel() {
       }
 
       setGenStatus(`✨ ${res.segments.length} хадмалыг таймлайн дээр өрж байна...`);
+      if (useEditor.getState().clips !== startingClips) throw new Error('Ажиллах хооронд таймлайн өөрчлөгдсөн тул хадмалыг сольсонгүй. Дахин үүсгэхэд хадгалсан танилтыг ашиглана.');
 
       // 3. Ensure overlay track exists
       let ovTrack = tracks.find((t) => t.kind === 'overlay');
@@ -167,7 +225,14 @@ export default function TextPanel() {
       }
 
       // 4. Create CapCut-styled subtitle clips
-      const newSubtitleClips: Clip[] = res.segments.map((seg) => ({
+      const visibleSegments = (compactCaptions ? layoutCaptions(res.segments) : res.segments).map(seg => {
+        if (!aClip) return seg;
+        const start = Math.max(seg.start, aClip.inPoint);
+        const end = Math.min(seg.start + seg.duration, aClip.outPoint);
+        return { ...seg, start: aClip.start + start - aClip.inPoint, duration: end - start };
+      }).filter(seg => seg.duration > 0);
+      if (!visibleSegments.length) throw new Error('Сонгосон аудионы хэсэгт яриа танигдсангүй.');
+      const newSubtitleClips: Clip[] = visibleSegments.map((seg) => ({
         id: Math.random().toString(36).slice(2, 10),
         kind: 'text',
         trackId: ovTrack.id,
@@ -196,7 +261,7 @@ export default function TextPanel() {
       }));
 
       // 5. Replace existing text clips or append
-      const otherClips = useEditor.getState().clips.filter((c) => c.trackId !== ovTrack.id && c.kind !== 'text');
+      const otherClips = useEditor.getState().clips.filter((c) => c.kind !== 'text');
       useEditor.setState({ clips: [...otherClips, ...newSubtitleClips] });
       void flushDraft();
 
@@ -205,6 +270,7 @@ export default function TextPanel() {
       console.error(err);
       alert('Алдаа: ' + (err.message || String(err)));
     } finally {
+      unsubscribe?.();
       setGenerating(false);
       setGenStatus('');
     }
@@ -274,13 +340,34 @@ export default function TextPanel() {
           <div style={{ fontSize: 11, color: '#a1a1aa', marginBottom: 10, lineHeight: 1.4 }}>
             {captionClips.length > 0
               ? `Таймлайн дээр ${captionClips.length} хадмал амжилттай үүссэн байна.`
-              : `Хоолойны долгионы амьсгаа авах зайг тооцоолж, яг CapCut шиг 1 товшилтоор хадмал үүсгэнэ.`
+              : `Монгол скриптээ оруулж аудиотой тулгана. Текстгүй бол аудионоос яриаг таньж хадмал үүсгэнэ.`
             }
+          </div>
+          <label htmlFor="caption-script" style={{ display: 'block', fontSize: 12, marginBottom: 6 }}>Монгол скрипт (заавал биш)</label>
+          <div style={{ marginBottom: 10, fontSize: 12 }}>
+            <label htmlFor="caption-model">Монгол яриа таних загвар</label>
+            <select id="caption-model" value={captionModel} disabled={generating || modelDownloading} onChange={e => setCaptionModel(e.target.value)} style={{ width: '100%', marginTop: 5 }}>
+              {captionModels.map(m => <option key={m.id} value={m.id}>{m.label} · {m.installed ? (m.id.startsWith('groq') ? '⚡ Бэлэн (Cloud)' : 'Суусан') : `${m.mb} MB татах`}</option>)}
+            </select>
+            {captionModels.some(m => m.id === captionModel && !m.installed && !m.id.startsWith('groq')) && <button className="btn" disabled={generating || modelDownloading} onClick={installCaptionModel}>{modelDownloading ? `Татаж байна ${modelProgress}%` : 'Сонгосон загварыг татах'}</button>}
+            <label style={{ display: 'block', marginTop: 8 }}><input type="checkbox" checked={compactCaptions} disabled={generating} onChange={e => setCompactCaptions(e.target.checked)} /> Богино хадмал · 2 мөр</label>
+          </div>
+          <textarea
+            id="caption-script"
+            value={captionScript}
+            onChange={event => setCaptionScript(event.target.value)}
+            disabled={generating || autoCutting}
+            placeholder="Аудионд уншсан Монгол текстээ энд хуулж тавина уу..."
+            rows={5}
+            style={{ width: '100%', boxSizing: 'border-box', resize: 'vertical', minHeight: 90, padding: 10, borderRadius: 6, border: '1px solid #52525b', background: '#111115', color: '#f4f4f5', fontSize: 12, lineHeight: 1.5 }}
+          />
+          <div style={{ fontSize: 11, color: '#a1a1aa', margin: '6px 0 10px' }}>
+            {captionScript.trim() ? `${captionScript.trim().length.toLocaleString()} тэмдэгт · Скриптийг аудиотой тулгана` : 'Текстгүй · Монгол яриа таних горим'}
           </div>
           <button
             type="button"
             className="btn primary"
-            disabled={generating}
+            disabled={generating || autoCutting || modelDownloading || !captionModels.some(m => m.id === captionModel && m.installed)}
             onClick={handleOneClickAutoCaption}
             style={{
               width: '100%',
@@ -300,6 +387,7 @@ export default function TextPanel() {
               <><span>✨</span> {captionClips.length > 0 ? 'Хадмалыг дахин 1 товшилтоор үүсгэх' : '1 товшилтоор хадмал үүсгэх (Generate)'}</>
             )}
           </button>
+          {generating && <button className="btn" onClick={() => window.api.cancelCaptionAlignment()}>Хадмал үүсгэхийг цуцлах</button>}
         </div>
 
         {/* Tab Switcher */}
@@ -488,7 +576,7 @@ export default function TextPanel() {
               </div>
 
               <div style={{ fontSize: 11, color: '#a1a1aa', lineHeight: 1.5, marginBottom: 10 }}>
-                Монгол хадмалуудыг Англи эх үзэгдлүүдтэй өгүүлбэр бүрээр нь тулгаж, видеоны замыг яг таг цагаар нь автоматаар зүсэж өрнө.
+                Монгол voice-ийн цагтай хадмалыг Англи эх SRT-тэй холбож, V1 дүрсийг ярианы хугацаанд өрнө. Дүрс хүрэлцэхгүй үед сүүлийн кадрыг царцааж барина.
               </div>
 
               {/* Status summary */}
@@ -502,13 +590,13 @@ export default function TextPanel() {
                 <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                   <span style={{ color: '#a1a1aa' }}>🎞️ Дүрсний зам (v1):</span>
                   <span style={{ color: videoClips.length > 1 ? '#38bdf8' : '#e4e4e7', fontWeight: 600 }}>
-                    {videoClips.length > 1 ? `${videoClips.length} үзэгдэл зүсэгдсэн` : '1 бүтэн бичлэг (Зүсэхэд бэлэн)'}
+                    {`${videoClips.length} clip`}
                   </span>
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span style={{ color: '#a1a1aa' }}>🇬🇧 Англи SRT:</span>
                   <span style={{ color: '#e4e4e7', fontWeight: 600, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={srtPath}>
-                    {srtFileName}
+                    {srtFileName || 'Сонгоогүй'}
                   </span>
                 </div>
               </div>
@@ -519,15 +607,16 @@ export default function TextPanel() {
                   className="btn ghost"
                   style={{ flex: 1, fontSize: 11, padding: '6px 8px' }}
                   onClick={handleSelectSrt}
+                  disabled={autoCutting}
                 >
-                  📁 Өөр SRT сонгох...
+                  📁 Англи SRT сонгох...
                 </button>
               </div>
 
               <button
                 type="button"
                 className="btn primary"
-                disabled={autoCutting || captionClips.length === 0}
+                disabled={autoCutting || generating || !srtPath || captionClips.length === 0 || tracks.find(t => t.id === 'v1')?.locked}
                 onClick={handleAutoCutBySrt}
                 style={{
                   width: '100%',
@@ -549,10 +638,15 @@ export default function TextPanel() {
               </button>
 
               {autoCutSuccess && (
-                <div style={{ marginTop: 8, padding: '6px 8px', background: 'rgba(74, 222, 128, 0.1)', border: '1px solid rgba(74, 222, 128, 0.3)', borderRadius: 6, fontSize: 11, color: '#4ade80' }}>
+                <div role="status" style={{ marginTop: 8, padding: '6px 8px', background: 'rgba(74, 222, 128, 0.1)', border: '1px solid rgba(74, 222, 128, 0.3)', borderRadius: 6, fontSize: 11, color: '#4ade80' }}>
                   {autoCutSuccess}
                 </div>
               )}
+              {autoCutReport && <div style={{ marginTop: 8, fontSize: 11, color: '#a1a1aa', lineHeight: 1.5 }}>
+                <div>Дүрс ба voice: {formatTime(autoCutReport.voiceStart)} – {formatTime(autoCutReport.voiceEnd)}. Буцаах: Ctrl+Z.</div>
+                {autoCutReport.warnings.map((warning, i) => <div key={i} style={{ marginTop: 4, color: '#facc15' }}>{warning}</div>)}
+              </div>}
+              {autoCutError && <div role="alert" style={{ marginTop: 8, fontSize: 11, color: '#f87171' }}>{autoCutError}</div>}
             </div>
 
             {/* Scenes List */}

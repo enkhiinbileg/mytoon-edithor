@@ -602,12 +602,16 @@ ipcMain.handle('dialog:openAudioFile', async () => {
   }
 });
 
+let captionController = null;
+ipcMain.handle('audio:cancelAlign', () => { captionController?.abort(); return true; });
 ipcMain.handle('audio:alignScript', async (_e, spec) => {
+  if (captionController) return { ok: false, error: 'Хадмал үүсгэх ажил ажиллаж байна.' };
+  captionController = new AbortController();
   try {
-    return await audioScriptAlign.alignAudioWithScript(spec, (p) => win?.webContents.send('voice-align:progress', p));
+    return await audioScriptAlign.alignAudioWithScript({ ...spec, signal: captionController.signal }, (p) => win?.webContents.send('voice-align:progress', p));
   } catch (err) {
-    return { ok: false, error: String(err.message || err) };
-  }
+    return { ok: false, error: captionController.signal.aborted ? 'Хадмал үүсгэхийг цуцаллаа.' : String(err.message || err) };
+  } finally { captionController = null; }
 });
 
 ipcMain.handle('srt:sync', async (_e, spec) => {
@@ -619,11 +623,40 @@ ipcMain.handle('srt:sync', async (_e, spec) => {
 });
 
 const recapAutoCut = require('./recap-auto-cut');
+const activeRecapCuts = new Set();
 ipcMain.handle('recap:autoCutBySrt', async (_e, spec) => {
+  const senderId = _e.sender.id;
+  if (activeRecapCuts.has(senderId)) return { ok: false, error: 'Auto-Cut ажиллаж байна. Дуусахыг хүлээнэ үү.' };
+  activeRecapCuts.add(senderId);
+  let apiKey = '';
+  const redact = value => {
+    const message = String(value || '');
+    return apiKey ? message.split(apiKey).join('[redacted]') : message;
+  };
   try {
-    return await recapAutoCut.autoCutByEnglishSrt(spec, (p) => win?.webContents.send('recap-cut:progress', p));
+    if (!spec || typeof spec.srtPath !== 'string' || !spec.srtPath.trim()) {
+      throw new Error('Эх видеоны Англи SRT файлыг сонгоно уу.');
+    }
+    apiKey = settings.secret('geminiApiKey');
+    return await recapAutoCut.autoCutByEnglishSrt({
+      srtPath: spec.srtPath,
+      captions: spec.captions,
+      projectData: spec.projectData,
+      videoMediaId: spec.videoMediaId,
+      geminiApiKey: apiKey,
+      model: 'gemini-2.5-flash',
+      outputDir: path.join(app.getPath('userData'), 'recap-freeze')
+    }, (p) => {
+      if (!_e.sender.isDestroyed()) _e.sender.send('recap-cut:progress', {
+        stage: p.stage,
+        message: redact(p.message),
+        requestId: spec.requestId
+      });
+    });
   } catch (err) {
-    return { ok: false, error: String(err.message || err) };
+    return { ok: false, error: redact(err.message || err) };
+  } finally {
+    activeRecapCuts.delete(senderId);
   }
 });
 
@@ -670,6 +703,45 @@ ipcMain.handle('script:buildRecap', async (_e, spec) => {
   } catch (err) {
     return { ok: false, error: String(err.message || err) };
   }
+});
+
+ipcMain.handle('script:scanRecovery', async () => {
+  try {
+    return { ok: true, ...await require('./voice-recovery').scanLatestParts(path.join(app.getPath('userData'), 'script-studio-audio')) };
+  } catch (error) { return { ok: false, error: error.message }; }
+});
+let recoveringVoice = false;
+let selectedAudioFolder = null;
+ipcMain.handle('script:pickAudioFolder', async () => {
+  try {
+    const picked = await dialog.showOpenDialog(win, { title: 'Нэгтгэх аудионы хавтас', properties: ['openDirectory'] });
+    if (picked.canceled) return { ok: true, canceled: true };
+    selectedAudioFolder = await require('./voice-recovery').scanAudioFolder(picked.filePaths[0]);
+    return { ok: true, ...selectedAudioFolder };
+  } catch (error) { return { ok: false, error: error.message }; }
+});
+ipcMain.handle('script:mergeAudioFolder', async (_e, token) => {
+  if (recoveringVoice) return { ok: false, error: 'Аудио нэгтгэж байна. Түр хүлээнэ үү.' };
+  recoveringVoice = true;
+  try {
+    const scan = selectedAudioFolder;
+    if (!scan || scan.token !== token) throw new Error('Хавтсаа дахин сонгоно уу.');
+    const saved = await dialog.showSaveDialog(win, { title: 'Нэгтгэсэн аудио хадгалах', defaultPath: 'merged-audio.mp3', filters: [{ name: 'MP3', extensions: ['mp3'] }] });
+    if (saved.canceled || !saved.filePath) return { ok: true, canceled: true };
+    return { ok: true, ...await require('./voice-recovery').mergeAudioFolder({ dir: scan.dir, token, output: saved.filePath }, ff) };
+  } catch (error) { return { ok: false, error: error.message }; }
+  finally { recoveringVoice = false; }
+});
+ipcMain.handle('script:mergeRecovery', async (_e, spec) => {
+  if (recoveringVoice) return { ok: false, error: 'Аудио нэгтгэж байна. Түр хүлээнэ үү.' };
+  recoveringVoice = true;
+  try {
+    const result = await require('./voice-recovery').mergeLatestParts({
+      dir: path.join(app.getPath('userData'), 'script-studio-audio'), token: spec?.token, allowGaps: spec?.allowGaps === true
+    }, ff);
+    return { ok: true, ...result };
+  } catch (error) { return { ok: false, error: error.message }; }
+  finally { recoveringVoice = false; }
 });
 
 ipcMain.handle('fonts:getAvailable', () => fontManager.getAvailableFonts(app));

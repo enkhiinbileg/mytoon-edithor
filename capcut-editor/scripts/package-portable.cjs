@@ -13,7 +13,7 @@ const appDir = path.join(output,'resources','app');
   const runtime = path.join(root,'runtime-tools');
   const bundled = path.join(output,'resources','recap-tools');
   fs.mkdirSync(bundled,{recursive:true});
-  for (const name of ['ffmpeg.exe','ffprobe.exe','yt-dlp.exe','ggml-base.bin','whisper','FFmpeg-LICENSE.txt','Whisper-LICENSE.txt','THIRD-PARTY.md']) {
+  for (const name of ['ffmpeg.exe','ffprobe.exe','yt-dlp.exe','ggml-tiny.bin','ggml-base.bin','ggml-small.bin','ggml-medium.bin','ggml-large-v3-turbo.bin','whisper','FFmpeg-LICENSE.txt','Whisper-LICENSE.txt','THIRD-PARTY.md']) {
     const source = path.join(runtime,name);
     const dest = path.join(bundled,name);
     if (fs.existsSync(source) && !fs.existsSync(dest)) {

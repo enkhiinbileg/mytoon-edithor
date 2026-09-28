@@ -639,7 +639,7 @@ export default function Preview() {
 
   const registerMaster = useCallback((el: HTMLAudioElement | null, clip: Clip) => {
     if (el) {
-      if (!masterMediaRef.current || clip.type === 'audio') {
+      if (!masterMediaRef.current || useEditor.getState().tracks.find(t => t.id === clip.trackId)?.kind === 'audio') {
         masterMediaRef.current = { element: el, clip };
       }
     } else {

@@ -226,6 +226,8 @@ async function alignAudioWithScript({
   minSilence = 0.22,
   noise = '-30dB',
   useWhisper = true,
+  whisperModel,
+  signal,
   mode = 'auto' // 'auto' | 'whisper' | 'fast'
 }, onProgress) {
   if (!audioPath || !fs.existsSync(audioPath)) {
@@ -273,6 +275,33 @@ async function alignAudioWithScript({
   }
 
   const sentences = splitScriptSentences(sourceText);
+
+  if (sentences.length && mode === 'script_captions') {
+    const state = whisper.status();
+    const model = whisperModel ? state.models.find(m => m.id === whisperModel && m.installed) : state.models.find(m => m.installed);
+    if (!state.available || !model) throw new Error('Скриптийг аудиотой тулгахад Whisper загвар шаардлагатай.');
+    const recognized = await whisper.transcribe(audioPath, { model: model.id, language: 'mn', onProgress, signal, quality: true });
+    onProgress?.({ message: 'Скриптийн үгсийг танигдсан яриатай тулгаж байна...', pct: 98 });
+    const segments = require('./script-caption-match').matchScript(sentences, recognized.segments || [], totalDuration);
+    return { ok: true, audioDuration: totalDuration, sentenceCount: segments.length, method: 'script_word_anchors', segments };
+  }
+
+  // Audio-only captions must come from recognized speech, never a curated script
+  // selected by a coincidentally similar duration or a silence-only fallback.
+  if (!sentences.length && useWhisper) {
+    const status = whisper.status();
+    const model = whisperModel ? status.models.find(m => m.id === whisperModel && m.installed) : status.models.find(m => m.installed);
+    if (!status.available || !model) throw new Error('Whisper хөдөлгүүр эсвэл загвар суулгаагүй байна. Аудио + Скрипт цонхоор текстээ оруулах эсвэл Whisper загвараа суулгана уу.');
+    onProgress?.({ stage: 'whisper_start', message: 'Монгол яриаг таньж хадмал үүсгэж байна...', pct: 0 });
+    const result = await whisper.transcribe(audioPath, { model: model.id, language: 'mn', onProgress, signal, quality: true });
+    const segments = (result.segments || []).map((s, id) => {
+      const start = Math.max(0, Math.min(totalDuration, s.start));
+      const end = Math.max(0, Math.min(totalDuration, s.end));
+      return { id, start, end, duration: end - start, text: String(s.text || '').trim() };
+    }).filter(s => s.text && Number.isFinite(s.start) && Number.isFinite(s.end) && s.duration > 0);
+    if (!segments.length) throw new Error('Аудионоос яриа танигдсангүй. Аудио + Скрипт цонхоор Монгол текстээ оруулна уу.');
+    return { ok: true, audioDuration: totalDuration, sentenceCount: segments.length, method: 'whisper_ai', segments };
+  }
 
   // 3. Check Curated 100% Exact Alignment (e.g. full_story_alignments.json)
   if (mode !== 'whisper_forced') {

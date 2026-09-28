@@ -18,6 +18,8 @@ export interface ExportOptions {
   customBitrate?: number;
   outPath?: string;
   exportVideo?: boolean;
+  signal?: AbortSignal;
+  onPreparationProgress?: (completed: number, total: number) => void;
 }
 
 export interface CodecOption {
@@ -240,7 +242,8 @@ export default function ExportDialog({
 
   // --- Export Execution & Live Progress ---
   const [phase, setPhase] = useState<'idle' | 'exporting' | 'completed' | 'error'>('idle');
-  const [progress, setProgress] = useState<{ pct: number; speed?: string; fps?: number; remainingSec?: number }>({ pct: 0 });
+  const [progress, setProgress] = useState<{ pct: number; speed?: string; fps?: number; remainingSec?: number; stage?: string; encoder?: string; completed?: number; total?: number }>({ pct: 0 });
+  const exportAbort = useRef<AbortController | null>(null);
   const [elapsedSec, setElapsedSec] = useState(0);
   const [finalPath, setFinalPath] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
@@ -266,7 +269,7 @@ export default function ExportDialog({
       if (typeof info === 'number') {
         setProgress({ pct: info });
       } else if (info && typeof info === 'object') {
-        setProgress(info);
+        setProgress(previous => ({ ...previous, ...info }));
       }
     });
     return () => unsub();
@@ -278,8 +281,11 @@ export default function ExportDialog({
       return;
     }
 
+    if (exportAbort.current) return;
+    const controller = new AbortController();
+    exportAbort.current = controller;
     setPhase('exporting');
-    setProgress({ pct: 0 });
+    setProgress({ pct: 0, stage: 'prepare-captions' });
     setElapsedSec(0);
     setErrorMsg('');
 
@@ -298,8 +304,14 @@ export default function ExportDialog({
         bitrateMode: mode,
         customBitrate: bitrateOption === 'custom' ? customBitrate : undefined,
         outPath: fullExportPath,
-        exportVideo
+        exportVideo,
+        signal: controller.signal,
+        onPreparationProgress: (completed, total) => {
+          if (!controller.signal.aborted) setProgress({ pct: 0, stage: 'prepare-captions', completed, total });
+        }
       });
+
+      if (controller.signal.aborted) { setPhase('idle'); return; }
 
       if (res && !res.ok) {
         setPhase('error');
@@ -309,16 +321,19 @@ export default function ExportDialog({
         setFinalPath(res?.path || fullExportPath);
       }
     } catch (err: any) {
+      if (controller.signal.aborted) { setPhase('idle'); return; }
       setPhase('error');
       setErrorMsg(err?.message || String(err));
+    } finally {
+      exportAbort.current = null;
     }
   };
 
   const handleCancelExport = async () => {
+    exportAbort.current?.abort();
     try {
       await window.api.cancelExport();
     } catch {}
-    setPhase('idle');
   };
 
   return (
@@ -595,6 +610,16 @@ export default function ExportDialog({
 
                       {/* Format */}
                       <div className="capcut-field-row">
+                        <span className="capcut-field-label">Acceleration</span>
+                        <span style={{ color: '#00d5c5', fontSize: 13 }}>
+                          {(() => {
+                            const encoder = detectedEncoders[codec.startsWith('hevc') ? 'hevc' : codec === 'av1' ? 'av1' : 'h264'];
+                            if (codec === 'rle') return 'CPU';
+                            return encoder?.includes('nvenc') ? 'NVIDIA GPU' : encoder?.includes('qsv') ? 'Intel GPU' : encoder?.includes('amf') ? 'AMD GPU' : encoder ? 'CPU' : 'Шалгаж байна…';
+                          })()}
+                        </span>
+                      </div>
+                      <div className="capcut-field-row">
                         <span className="capcut-field-label">Format</span>
                         <select
                           className="capcut-select"
@@ -746,7 +771,7 @@ export default function ExportDialog({
                     className="capcut-exporting-status"
                     title={progress.speed ? `Speed: ${progress.speed} | FPS: ${progress.fps ?? '-'} | Remaining: ${progress.remainingSec ?? '-'}s` : undefined}
                   >
-                    <span>Applying features...</span>
+                      <span>{progress.stage === 'prepare-captions' ? `Хадмал бэлдэж байна${progress.total ? ` · ${progress.completed ?? 0}/${progress.total}` : '…'}` : progress.stage === 'mux-audio' ? 'Дуу нэгтгэж, файл бэлдэж байна' : progress.stage === 'prepare-video' ? 'Дүрс бэлдэж байна' : 'Дүрс боловсруулж байна'}{progress.speed ? ` · ${progress.speed}` : ''}</span>
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ opacity: 0.7 }}>
                       <circle cx="12" cy="12" r="10" />
                       <line x1="12" y1="16" x2="12" y2="12" />

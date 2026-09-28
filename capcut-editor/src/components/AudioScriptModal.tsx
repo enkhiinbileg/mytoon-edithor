@@ -285,6 +285,10 @@ export default function AudioScriptModal({ isOpen, onClose, onSuccessNotice }: P
           transitionDuration: 0.6
         }));
       } else {
+        const voiceDuration = targetMedia.duration || res.audioDuration;
+        if (typeof voiceDuration !== 'number' || !Number.isFinite(voiceDuration) || voiceDuration <= 0) {
+          throw new Error('Монгол voice-ийн уртыг уншиж чадсангүй. Аудиогоо дахин оруулна уу.');
+        }
         newAudioClips = [
           {
             id: uid(),
@@ -293,7 +297,7 @@ export default function AudioScriptModal({ isOpen, onClose, onSuccessNotice }: P
             trackId: audioTrack.id,
             start: 0,
             inPoint: 0,
-            outPoint: targetMedia.duration || res.audioDuration,
+            outPoint: voiceDuration,
             label: targetMedia.name || 'Master Mongolian Voice',
             volume: 1,
             opacity: 1,

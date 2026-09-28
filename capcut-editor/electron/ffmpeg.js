@@ -4,6 +4,8 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { isSimpleMutedSequence, normalizeSimpleSequence } = require('./recap-sequence-export');
+const { canSequenceOverlays, prepareOverlaySequence } = require('./recap-overlay-sequence');
 
 // Resolve the ffmpeg/ffprobe binaries. Shotcut ships working Windows builds, so
 // reuse those when present instead of making the user install ffmpeg separately.
@@ -338,39 +340,47 @@ function buildKeyframeExpr(kfs, prop, defaultVal) {
  * Detect and cache best hardware or software video encoder.
  */
 const encoderCache = new Map();
-async function getBestVideoEncoder(codec = 'hevc') {
+function encoderWorks(binary, encoder) {
+  return new Promise(resolve => {
+    const child = spawn(binary, ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi',
+      '-i', 'testsrc2=duration=1:size=640x360:rate=30', '-c:v', encoder,
+      '-frames:v', '1', '-f', 'null', '-'], { windowsHide: true, stdio: 'ignore' });
+    const timeout = setTimeout(() => { child.kill(); resolve(false); }, 10000);
+    child.on('close', code => { clearTimeout(timeout); resolve(code === 0); });
+    child.on('error', () => { clearTimeout(timeout); resolve(false); });
+  });
+}
+async function getExportBackend(codec = 'hevc') {
   const norm = String(codec).toLowerCase();
   if (encoderCache.has(norm)) return encoderCache.get(norm);
-
-  let candidates;
-  if (norm === 'rle') {
-    candidates = ['qtrle'];
-  } else if (norm.startsWith('hevc')) {
-    candidates = ['hevc_qsv', 'hevc_nvenc', 'hevc_amf', 'libx265'];
-  } else if (norm === 'av1') {
-    candidates = ['av1_qsv', 'av1_nvenc', 'libsvtav1', 'libaom-av1'];
-  } else {
-    candidates = ['h264_qsv', 'h264_nvenc', 'h264_amf', 'libx264'];
-  }
-
-  for (const cand of candidates) {
-    const works = await new Promise((res) => {
-      const p = spawn(FFMPEG, [
-        '-y', '-f', 'lavfi', '-i', 'testsrc=duration=1:size=640x360:rate=30',
-        '-c:v', cand, '-frames:v', '1', '-f', 'null', '-'
-      ], { windowsHide: true });
-      p.on('close', (code) => res(code === 0));
-      p.on('error', () => res(false));
-    });
-    if (works) {
-      encoderCache.set(norm, cand);
-      return cand;
+  const selection = (async () => {
+    const prefix = norm.startsWith('hevc') ? 'hevc' : norm === 'av1' ? 'av1' : 'h264';
+    const software = norm === 'rle' ? 'qtrle' : prefix === 'hevc' ? 'libx265' : prefix === 'av1' ? 'libaom-av1' : 'libx264';
+    if (norm === 'rle') return { binary: FFMPEG, encoder: software };
+    // A bundled NVENC build can require a newer driver than the installed GPU.
+    // Try an installed compatible runtime before falling back to another GPU.
+    // An explicit FFMPEG_PATH override remains authoritative.
+    const binaries = [FFMPEG];
+    if (!process.env.FFMPEG_PATH) {
+      for (const base of [path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Shotcut'),
+        path.join(process.env.ProgramFiles || '', 'Shotcut')]) {
+        const binary = path.join(base, 'ffmpeg.exe');
+        if (fs.existsSync(binary) && !binaries.includes(binary)) binaries.push(binary);
+      }
     }
-  }
-
-  const fallback = norm === 'rle' ? 'qtrle' : (norm.startsWith('hevc') ? 'libx265' : (norm === 'av1' ? 'libaom-av1' : 'libx264'));
-  encoderCache.set(norm, fallback);
-  return fallback;
+    for (const binary of binaries) {
+      if (await encoderWorks(binary, `${prefix}_nvenc`)) return { binary, encoder: `${prefix}_nvenc` };
+    }
+    for (const encoder of [`${prefix}_qsv`, `${prefix}_amf`, ...(prefix === 'av1' ? ['libsvtav1'] : [])]) {
+      if (await encoderWorks(FFMPEG, encoder)) return { binary: FFMPEG, encoder };
+    }
+    return { binary: FFMPEG, encoder: software };
+  })();
+  encoderCache.set(norm, selection);
+  return selection;
+}
+async function getBestVideoEncoder(codec = 'hevc') {
+  return (await getExportBackend(codec)).encoder;
 }
 
 async function detectHardwareEncoders() {
@@ -426,8 +436,75 @@ function mergeContiguousClips(clips) {
   return merged;
 }
 
+function videoEncodingArgs(spec, encoder) {
+  const { width, height, fps } = spec;
+  const chosenCodec = spec.codec || 'hevc';
+  const args = [];
+    // Calculate resolution-proportional bitrate
+    const basePixels = (width || 1920) * (height || 1080) * (fps || 30);
+    const standardBitrate = Math.round((basePixels / (1920 * 1080 * 30)) * 8000); // 8000 kbps for 1080p30
+    let targetBitrate = standardBitrate;
+    if (spec.customBitrate && Number(spec.customBitrate) > 0) {
+      targetBitrate = Number(spec.customBitrate);
+    } else if (spec.bitrateMode === 'higher' || spec.quality === 'high') {
+      targetBitrate = Math.round(standardBitrate * 1.5);
+    } else if (spec.bitrateMode === 'lower' || spec.quality === 'draft') {
+      targetBitrate = Math.round(standardBitrate * 0.5);
+    }
+
+    const isCbr = spec.bitrateMode === 'cbr';
+
+    args.push('-c:v', encoder);
+
+    if (encoder.includes('qsv')) {
+      const qsvPreset = spec.quality === 'high' ? 'faster' : 'veryfast';
+      args.push('-preset', qsvPreset, '-async_depth', '8');
+      if (isCbr) {
+        args.push('-b:v', `${targetBitrate}k`, '-maxrate', `${targetBitrate}k`, '-bufsize', `${targetBitrate * 2}k`);
+      } else {
+        args.push('-b:v', `${targetBitrate}k`, '-maxrate', `${Math.round(targetBitrate * 1.5)}k`, '-bufsize', `${targetBitrate * 2}k`);
+      }
+    } else if (encoder.includes('nvenc')) {
+      const nvPreset = spec.quality === 'high' ? 'p4' : 'p2';
+      args.push('-preset', nvPreset);
+      if (isCbr) {
+        args.push('-b:v', `${targetBitrate}k`, '-cbr', '1', '-bufsize', `${targetBitrate * 2}k`);
+      } else {
+        args.push('-b:v', `${targetBitrate}k`, '-maxrate', `${Math.round(targetBitrate * 1.5)}k`, '-bufsize', `${targetBitrate * 2}k`);
+      }
+    } else {
+      // libx264 / libx265 / libaom-av1 / qtrle
+      if (encoder === 'qtrle') {
+        // QuickTime Animation (RLE)
+      } else {
+        const preset = spec.quality === 'draft' ? 'ultrafast' : (spec.quality === 'high' ? 'fast' : 'veryfast');
+        args.push('-preset', preset);
+        if (isCbr) {
+          args.push('-b:v', `${targetBitrate}k`, '-minrate', `${targetBitrate}k`, '-maxrate', `${targetBitrate}k`, '-bufsize', `${targetBitrate * 2}k`);
+        } else if (spec.customBitrate) {
+          args.push('-b:v', `${targetBitrate}k`, '-maxrate', `${Math.round(targetBitrate * 1.5)}k`, '-bufsize', `${targetBitrate * 2}k`);
+        } else {
+          const crf = chosenCodec.startsWith('hevc') ? '24' : '20';
+          args.push('-crf', crf);
+        }
+      }
+    }
+
+    if (chosenCodec === 'rle') {
+      args.push('-pix_fmt', 'argb');
+    } else if (chosenCodec === 'hevc_422') {
+      args.push('-pix_fmt', 'yuv422p');
+    } else {
+      args.push('-pix_fmt', 'yuv420p');
+    }
+
+  return args;
+}
+
 /** Render absolute timeline positions, including gaps, stacked tracks, and CapCut export specifications. */
 async function exportTimeline(spec, onProgress) {
+  const backend = await getExportBackend(spec.codec || 'hevc');
+  const FFMPEG = backend.binary;
   const {clips = [], audio = [], overlays = [], width, height, fps, outPath} = spec;
   const isMp3 = spec.format === 'mp3' || String(outPath).toLowerCase().endsWith('.mp3');
   const duration = (typeof spec.duration === 'number' && spec.duration > 0)
@@ -544,8 +621,11 @@ async function exportTimeline(spec, onProgress) {
   const mergedAudio = mergeContiguousClips(audio);
 
   const chosenCodec = spec.codec || 'hevc';
-  const encoder = await getBestVideoEncoder(chosenCodec);
+  const encoder = width < 256 || height < 128
+    ? (chosenCodec.startsWith('hevc') ? 'libx265' : chosenCodec === 'h264' ? 'libx264' : backend.encoder)
+    : backend.encoder;
   const isHwEncoder = encoder.includes('qsv') || encoder.includes('nvenc') || encoder.includes('amf');
+  onProgress?.({ pct: 0, encoder, stage: 'encode-video' });
 
   const args = ['-y','-filter_complex_threads','0'];
   const graph = [];
@@ -558,27 +638,47 @@ async function exportTimeline(spec, onProgress) {
     (sorted[0].opacity ?? 1) === 1 && (!sorted[0].keyframes || sorted[0].keyframes.length === 0) &&
     (sorted[0].scale ?? 1) === 1 && (sorted[0].rotation ?? 0) === 0 &&
     (sorted[0].x ?? 0.5) === 0.5 && (sorted[0].y ?? 0.5) === 0.5 &&
-    sorted[0].start === 0;
+    (!sorted[0].filterFf || sorted[0].filterFf === 'none') &&
+    (!sorted[0].effectFf || sorted[0].effectFf === 'none') &&
+    (!sorted[0].transition || sorted[0].transition === 'none') &&
+    sorted[0].start === 0 && sorted[0].outPoint - sorted[0].inPoint >= duration - 1e-7;
 
-  const BLACK_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
-  const blackPngPath = path.join(OVERLAY_DIR, 'black_1x1.png');
-  if (!fs.existsSync(blackPngPath)) {
-    try { fs.writeFileSync(blackPngPath, Buffer.from(BLACK_PNG_BASE64, 'base64')); } catch {}
+  let directGpuVideo = false;
+  if (isSingleFullScreen && sorted[0].kind !== 'image' && encoder.includes('nvenc')
+    && ['h264', 'hevc', 'av1'].includes(chosenCodec)) {
+    // Keep decoded frames on the GPU when no resize, compositing, rotation,
+    // aspect correction or frame-rate conversion is required.
+    const metadata = JSON.parse(await run(FFPROBE, ['-v', 'error', '-select_streams', 'v:0',
+      '-show_streams', '-of', 'json', sorted[0].src]));
+    const stream = metadata.streams?.[0];
+    const rate = String(stream?.r_frame_rate || '0/1').split('/').map(Number);
+    const average = String(stream?.avg_frame_rate || '0/1').split('/').map(Number);
+    directGpuVideo = stream?.width === width && stream?.height === height
+      && ['h264', 'hevc', 'av1'].includes(stream.codec_name)
+      && stream.pix_fmt === 'yuv420p' && ['1:1', 'N/A', undefined].includes(stream.sample_aspect_ratio)
+      && ['progressive', 'unknown', undefined].includes(stream.field_order)
+      && Math.abs(rate[0] / rate[1] - fps) < 1e-6 && Math.abs(average[0] / average[1] - fps) < 1e-6
+      && !(stream.side_data_list || []).some(item => Number(item.rotation || 0) !== 0)
+      && !Number(stream.tags?.rotate || 0);
   }
-  tempFiles.push(blackPngPath);
 
-  // Concat Demuxer is eligible for any standard cut sequence or any large project (>50 clips) to prevent Windows ENAMETOOLONG
-  const isConcatDemuxerEligible = sorted.length > 1 && (
-    sorted.length > 50 ||
-    sorted.every((c) => (c.opacity ?? 1) === 1 &&
-      (!c.keyframes || c.keyframes.length === 0) &&
-      (c.scale ?? 1) === 1 && (c.rotation ?? 0) === 0 &&
-      (c.x ?? 0.5) === 0.5 && (c.y ?? 0.5) === 0.5 &&
-      (!c.transition || c.transition === 'none') &&
-      (!c.filterFf || c.filterFf === 'none') &&
-      (!c.effectFf || c.effectFf === 'none')
-    )
-  );
+  // Raw image/video packets cannot share a concat-demuxer stream. Normalize
+  // simple sequences in bounded batches, irrespective of their clip count.
+  const isConcatDemuxerEligible = isSimpleMutedSequence(sorted);
+  // Encode each bounded batch directly to the requested delivery codec. The
+  // final pass only copies those packets and mixes audio, avoiding re-encoding.
+  const copySequenceVideo = isConcatDemuxerEligible && ['h264', 'hevc'].includes(chosenCodec)
+    && (overlays.length === 0 || canSequenceOverlays(overlays, width, height, 1));
+  let sequenceDir = null;
+  let captionDir = null;
+  const cleanupSequence = () => {
+    if (sequenceDir && path.dirname(sequenceDir) === OVERLAY_DIR) {
+      try { fs.rmSync(sequenceDir, { recursive: true, force: true }); } catch {}
+    }
+    if (captionDir && path.dirname(captionDir) === OVERLAY_DIR) {
+      try { fs.rmSync(captionDir, { recursive: true, force: true }); } catch {}
+    }
+  };
 
   const needsBlackCanvas = !isSingleFullScreen && !isConcatDemuxerEligible;
 
@@ -597,78 +697,38 @@ async function exportTimeline(spec, onProgress) {
 
   try {
     if (isConcatDemuxerEligible) {
-      const manifestFile = path.join(OVERLAY_DIR, 'concat_' + process.pid + '_' + crypto.randomBytes(6).toString('hex') + '.txt');
-      tempFiles.push(manifestFile);
-      const lines = ['ffconcat version 1.0'];
-
-      // Build a gap-filled, overlap-resolved continuous stream of clips from 0 to duration
-      let currentTime = 0;
-      for (let i = 0; i < sorted.length; i++) {
-        const c = sorted[i];
-
-        // 1. Fill any gap before clip with black canvas
-        if (c.start > currentTime + 0.03) {
-          const gap = c.start - currentTime;
-          lines.push(`file '${blackPngPath.replace(/\\/g, '/')}'`);
-          lines.push(`duration ${gap.toFixed(3)}`);
-          currentTime = c.start;
-        }
-
-        // 2. Determine actual duration of this clip, cleanly resolving any slight overlap with next clip
-        const origDur = Math.max(0.04, c.outPoint - c.inPoint);
-        const nextStart = (i + 1 < sorted.length) ? sorted[i + 1].start : duration;
-        let actualDur = origDur;
-        if (nextStart < c.start + origDur - 0.01) {
-          actualDur = Math.max(0.04, nextStart - c.start);
-        }
-
-        if (c.kind === 'image') {
-          lines.push(`file '${c.src.replace(/\\/g, '/')}'`);
-          lines.push(`duration ${actualDur.toFixed(3)}`);
-        } else {
-          lines.push(`file '${c.src.replace(/\\/g, '/')}'`);
-          lines.push(`inpoint ${c.inPoint.toFixed(3)}`);
-          lines.push(`outpoint ${(c.inPoint + actualDur).toFixed(3)}`);
-        }
-        currentTime = c.start + actualDur;
-      }
-
-      // 3. Trailing gap to end of duration if needed
-      if (currentTime < duration - 0.03) {
-        const gap = duration - currentTime;
-        lines.push(`file '${blackPngPath.replace(/\\/g, '/')}'`);
-        lines.push(`duration ${gap.toFixed(3)}`);
-      }
-
-      fs.writeFileSync(manifestFile, lines.join('\n'));
-
-      if (isHwEncoder) {
-        args.push('-hwaccel', 'd3d11va');
-      }
-      args.push('-f', 'concat', '-safe', '0', '-i', manifestFile);
+      sequenceDir = fs.mkdtempSync(path.join(OVERLAY_DIR, 'recap-sequence-'));
+      const prepared = await normalizeSimpleSequence({ clips: sorted, width, height, fps, duration,
+        workDir: sequenceDir, ffmpeg: FFMPEG, ffprobe: FFPROBE,
+        onProcess: (proc) => { activeExportProcess = proc; }, onProgress,
+        encodeArgs: copySequenceVideo ? videoEncodingArgs(spec, encoder) : undefined,
+        overlays: copySequenceVideo ? overlays : [] });
+      args.push('-f', 'concat', '-safe', '0', '-i', prepared.manifest);
       const concatInput = index++;
       const baseFit = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`;
-      graph.push(`[${concatInput}:v]${baseFit},setsar=1,fps=${fps},settb=AVTB,format=yuv420p[vconcat]`);
-      vCurrent = '[vconcat]';
-
-      if (sorted.some((c) => c.hasAudio && c.kind !== 'image' && (c.volume ?? 1) > 0.001)) {
-        graph.push(`[${concatInput}:a]aresample=48000,aformat=channel_layouts=stereo,volume=${fx(sorted[0].volume ?? 1)}[sound_concat]`);
-        sounds.push('[sound_concat]');
+      if (copySequenceVideo) vCurrent = `${concatInput}:v:0`;
+      else {
+        graph.push(`[${concatInput}:v]${baseFit},setsar=1,fps=${fps},settb=AVTB,format=yuv420p[vconcat]`);
+        vCurrent = '[vconcat]';
       }
     } else if (isSingleFullScreen) {
       const c = sorted[0];
       const d = c.outPoint - c.inPoint;
       if (c.kind === 'image') args.push('-loop', '1', '-framerate', String(fps), '-t', String(d), '-i', c.src);
       else {
-        if (isHwEncoder) args.push('-hwaccel', 'd3d11va');
+        if (isHwEncoder) args.push('-hwaccel', encoder.includes('nvenc') ? 'cuda' : 'd3d11va');
+        if (directGpuVideo) args.push('-hwaccel_output_format', 'cuda');
         args.push('-ss', String(c.inPoint), '-t', String(d), '-i', c.src);
       }
       const input = index++;
       const baseFit = (c.fitMode === 'cover')
         ? `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`
         : `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`;
-      graph.push(`[${input}:v]${baseFit},setsar=1,fps=${fps},settb=AVTB,format=yuv420p[clip0]`);
-      vCurrent = '[clip0]';
+      if (directGpuVideo) vCurrent = `${input}:v:0`;
+      else {
+        graph.push(`[${input}:v]${baseFit},setsar=1,fps=${fps},settb=AVTB,format=yuv420p[clip0]`);
+        vCurrent = '[clip0]';
+      }
 
       if (c.hasAudio && c.kind !== 'image') {
         graph.push(`[${input}:a]atrim=duration=${d},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume=${fx(c.volume ?? 1)}[sound0]`);
@@ -680,7 +740,7 @@ async function exportTimeline(spec, onProgress) {
         if (!(d>0) || !(c.start>=0)) throw new Error('Invalid clip timing.');
         if(c.kind==='image') args.push('-loop','1','-framerate',String(fps),'-t',String(d),'-i',c.src);
         else {
-          if (isHwEncoder) args.push('-hwaccel', 'd3d11va');
+          if (isHwEncoder) args.push('-hwaccel', encoder.includes('nvenc') ? 'cuda' : 'd3d11va');
           args.push('-ss',String(c.inPoint),'-t',String(d),'-i',c.src);
         }
         const input=index++;
@@ -762,7 +822,15 @@ async function exportTimeline(spec, onProgress) {
       }
     }
 
-    overlays.forEach((o,k)=>{
+    if (!copySequenceVideo && canSequenceOverlays(overlays, width, height)) {
+      captionDir = fs.mkdtempSync(path.join(OVERLAY_DIR, 'recap-captions-'));
+      const manifest = prepareOverlaySequence({overlays,width,height,fps,duration,workDir:captionDir});
+      args.push('-f','concat','-safe','0','-i',manifest);
+      const input=index++;
+      graph.push(`[${input}:v]format=rgba,fps=${fps},settb=AVTB[captionSequence]`);
+      graph.push(vCurrent+'[captionSequence]overlay=x=0:y=0:eof_action=pass:repeatlast=0[captioned]');
+      vCurrent='[captioned]';
+    } else if (!copySequenceVideo) overlays.forEach((o,k)=>{
       const file=path.join(OVERLAY_DIR,'ov_'+process.pid+'_'+crypto.randomBytes(6).toString('hex')+'.png');
       tempFiles.push(file);
       fs.writeFileSync(file,Buffer.from(o.dataUrl.replace(/^data:image\/png;base64,/,''),'base64'));
@@ -780,78 +848,27 @@ async function exportTimeline(spec, onProgress) {
       sounds.push('[extra'+k+']');
     });
 
-    graph.push(vCurrent+'format=yuv420p[vout]');
+    if (!copySequenceVideo && !directGpuVideo) graph.push(vCurrent+'format=yuv420p[vout]');
     graph.push(sounds.join('')+'amix=inputs='+sounds.length+':normalize=0:duration=first,atrim=duration='+fx(duration)+'[aout]');
 
-    // Calculate resolution-proportional bitrate
-    const basePixels = (width || 1920) * (height || 1080) * (fps || 30);
-    const standardBitrate = Math.round((basePixels / (1920 * 1080 * 30)) * 8000); // 8000 kbps for 1080p30
-    let targetBitrate = standardBitrate;
-    if (spec.customBitrate && Number(spec.customBitrate) > 0) {
-      targetBitrate = Number(spec.customBitrate);
-    } else if (spec.bitrateMode === 'higher' || spec.quality === 'high') {
-      targetBitrate = Math.round(standardBitrate * 1.5);
-    } else if (spec.bitrateMode === 'lower' || spec.quality === 'draft') {
-      targetBitrate = Math.round(standardBitrate * 0.5);
-    }
-
-    const isCbr = spec.bitrateMode === 'cbr';
-
-    args.push('-filter_complex', graph.join(';'), '-map', '[vout]', '-map', '[aout]', '-t', String(duration));
-    args.push('-c:v', encoder);
-
-    if (encoder.includes('qsv')) {
-      const qsvPreset = spec.quality === 'high' ? 'faster' : 'veryfast';
-      args.push('-preset', qsvPreset, '-async_depth', '8');
-      if (isCbr) {
-        args.push('-b:v', `${targetBitrate}k`, '-maxrate', `${targetBitrate}k`, '-bufsize', `${targetBitrate * 2}k`);
-      } else {
-        args.push('-b:v', `${targetBitrate}k`, '-maxrate', `${Math.round(targetBitrate * 1.5)}k`, '-bufsize', `${targetBitrate * 2}k`);
-      }
-    } else if (encoder.includes('nvenc')) {
-      const nvPreset = spec.quality === 'high' ? 'p4' : 'p2';
-      args.push('-preset', nvPreset);
-      if (isCbr) {
-        args.push('-b:v', `${targetBitrate}k`, '-cbr', '1', '-bufsize', `${targetBitrate * 2}k`);
-      } else {
-        args.push('-b:v', `${targetBitrate}k`, '-maxrate', `${Math.round(targetBitrate * 1.5)}k`, '-bufsize', `${targetBitrate * 2}k`);
-      }
-    } else {
-      // libx264 / libx265 / libaom-av1 / qtrle
-      if (encoder === 'qtrle') {
-        // QuickTime Animation (RLE)
-      } else {
-        const preset = spec.quality === 'draft' ? 'ultrafast' : (spec.quality === 'high' ? 'fast' : 'veryfast');
-        args.push('-preset', preset);
-        if (isCbr) {
-          args.push('-b:v', `${targetBitrate}k`, '-minrate', `${targetBitrate}k`, '-maxrate', `${targetBitrate}k`, '-bufsize', `${targetBitrate * 2}k`);
-        } else if (spec.customBitrate) {
-          args.push('-b:v', `${targetBitrate}k`, '-maxrate', `${Math.round(targetBitrate * 1.5)}k`, '-bufsize', `${targetBitrate * 2}k`);
-        } else {
-          const crf = chosenCodec.startsWith('hevc') ? '24' : '20';
-          args.push('-crf', crf);
-        }
-      }
-    }
-
+    args.push('-filter_complex', graph.join(';'), '-map', copySequenceVideo || directGpuVideo ? vCurrent : '[vout]', '-map', '[aout]', '-t', String(duration));
+    const encodingArgs = videoEncodingArgs(spec, encoder);
+    if (directGpuVideo) encodingArgs.splice(encodingArgs.indexOf('-pix_fmt'), 2);
+    args.push(...(copySequenceVideo ? ['-c:v', 'copy'] : encodingArgs));
     const isMov = spec.format === 'mov' || chosenCodec === 'rle';
-    if (chosenCodec === 'rle') {
-      args.push('-pix_fmt', 'argb');
-    } else if (chosenCodec === 'hevc_422') {
-      args.push('-pix_fmt', 'yuv422p');
-    } else {
-      args.push('-pix_fmt', 'yuv420p');
-    }
     args.push('-c:a', 'aac', '-b:a', spec.audioBitrate || '192k');
     if (!isMov) {
       args.push('-movflags', '+faststart');
     }
     args.push('-progress', 'pipe:1', '-nostats', outPath);
 
+    onProgress?.({ pct: copySequenceVideo ? 95 : isConcatDemuxerEligible ? 50 : 0,
+      encoder, stage: copySequenceVideo ? 'mux-audio' : 'encode-video' });
     return new Promise((resolve, reject) => {
       const proc = spawn(FFMPEG, args, { windowsHide: true });
       activeExportProcess = proc;
       let stderr = '', progress = '';
+      let measuredSpeed = 0, measuredFps = 0;
       proc.stdout.on('data', b => {
         progress += b.toString();
         const lines = progress.split('\n'); progress = lines.pop() || '';
@@ -859,17 +876,19 @@ async function exportTimeline(spec, onProgress) {
           const mTime = /^out_time_us=(\d+)/.exec(line);
           const mSpeed = /^speed=\s*([\d\.]+)x/.exec(line);
           const mFps = /^fps=\s*([\d\.]+)/.exec(line);
+          if (mSpeed) measuredSpeed = Number(mSpeed[1]);
+          if (mFps) measuredFps = Number(mFps[1]);
           if (mTime) {
             const curSec = +mTime[1] / 1e6;
-            const pct = Math.min(99, Math.round(curSec / duration * 100));
-            const spd = mSpeed ? parseFloat(mSpeed[1]) : (pct > 0 ? curSec / Math.max(1, (Date.now() - startTime) / 1000) : 1);
+            const pct = Math.min(99, Math.round((copySequenceVideo ? 95 : isConcatDemuxerEligible ? 50 : 0) + curSec / duration * (copySequenceVideo ? 5 : isConcatDemuxerEligible ? 50 : 100)));
+            const spd = measuredSpeed || (pct > 0 ? curSec / Math.max(1, (Date.now() - startTime) / 1000) : 1);
             const remSec = spd > 0 ? Math.max(0, Math.round((duration - curSec) / spd)) : null;
             if (pct !== lastPct) {
               lastPct = pct;
               onProgress?.({
                 pct,
                 speed: spd ? `${spd.toFixed(1)}x` : undefined,
-                fps: mFps ? Math.round(parseFloat(mFps[1])) : undefined,
+                fps: measuredFps ? Math.round(measuredFps) : undefined,
                 remainingSec: remSec
               });
             }
@@ -880,6 +899,7 @@ async function exportTimeline(spec, onProgress) {
       const cleanup = () => {
         activeExportProcess = null;
         for (const file of tempFiles) { try { fs.unlinkSync(file); } catch {} }
+        cleanupSequence();
       };
       proc.on('error', e => { cleanup(); reject(e); });
       proc.on('close', code => {
@@ -894,6 +914,7 @@ async function exportTimeline(spec, onProgress) {
     });
   } catch (e) {
     for (const file of tempFiles) { try { fs.unlinkSync(file); } catch {} }
+    cleanupSequence();
     throw e;
   }
 }
@@ -1148,7 +1169,7 @@ async function concatAudioFiles(files, outPath) {
     return outPath;
   }
   const manifestPath = path.join(path.dirname(outPath), `concat_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.txt`);
-  const lines = files.map((f) => `file '${f.replace(/\\/g, '/')}'`);
+  const lines = files.map((f) => `file '${f.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`);
   fs.writeFileSync(manifestPath, lines.join('\n'));
   try {
     await run(FFMPEG, [

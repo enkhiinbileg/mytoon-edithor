@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const settings = require('./settings');
 const tts = require('./tts');
 const ff = require('./ffmpeg');
+const { classifyError } = require('./elevenlabs-errors');
+const { createPartCache } = require('./tts-part-cache');
 
 const API = 'https://api.elevenlabs.io/v1';
 
@@ -11,7 +13,8 @@ const API = 'https://api.elevenlabs.io/v1';
 async function fetchKeyQuota(apiKey) {
   try {
     const res = await fetch(`${API}/user`, {
-      headers: { 'xi-api-key': apiKey }
+      headers: { 'xi-api-key': apiKey },
+      signal: AbortSignal.timeout(12000)
     });
     if (!res.ok) {
       if (res.status === 401) return { valid: false, error: 'Түлхүүр буруу эсвэл хүчингүй (401).' };
@@ -59,7 +62,10 @@ async function verifyAndAddKey(apiKey, label) {
 /** Refresh quotas for all registered keys in the pool */
 async function refreshAllQuotas() {
   const decrypted = settings.getKeyPoolDecrypted();
-  for (const it of decrypted) {
+  let cursor = 0;
+  await Promise.all(Array.from({ length: Math.min(4, decrypted.length) }, async () => {
+   while (cursor < decrypted.length) {
+    const it = decrypted[cursor++];
     try {
       const q = await fetchKeyQuota(it.apiKey);
       if (q.valid) {
@@ -69,12 +75,14 @@ async function refreshAllQuotas() {
           used: q.used,
           limit: q.limit,
           remaining: q.remaining
-        }, q.remaining <= 0 ? 'exhausted' : 'ready');
+        }, it.status === 'blocked' ? 'blocked' : q.remaining <= 0 ? 'exhausted' :
+          ['insufficient', 'error'].includes(it.status) ? it.status : 'ready');
       } else {
-        settings.updateKeyPoolQuota(it.id, null, 'error');
+        settings.updateKeyPoolQuota(it.id, null, it.status === 'blocked' ? 'blocked' : 'error');
       }
     } catch {}
-  }
+   }
+  }));
   return settings.getKeyPoolPublic();
 }
 
@@ -92,6 +100,7 @@ async function dispatchPoolTTS({
   similarity = 0.75,
   speed = 1.0,
   outDir,
+  resume = false,
   onProgress
 }) {
   if (!Array.isArray(chunks) || chunks.length === 0) {
@@ -130,7 +139,7 @@ async function dispatchPoolTTS({
   }));
 
   // Queue of chunks to process
-  const queue = chunks.map((text, index) => ({
+  let queue = chunks.map((text, index) => ({
     index,
     text,
     retries: 0,
@@ -140,6 +149,17 @@ async function dispatchPoolTTS({
   const totalChunks = chunks.length;
   const results = new Array(totalChunks);
   let completedCount = 0;
+  let lastQuotaError = '';
+  let fatalError = null;
+  const controller = new AbortController();
+  const cache = resume ? createPartCache(outDir, { voiceId, modelId, stability, similarity, speed }) : null;
+  if (cache) {
+    for (const task of queue) {
+      const hit = await cache.read(task.text);
+      if (hit) { results[task.index] = { ...hit, pIdx: task.index }; completedCount++; }
+    }
+    queue = queue.filter(task => !results[task.index]);
+  }
 
   // Maximum concurrent tasks: min(workers.length, 6)
   const maxConcurrency = Math.min(Math.max(1, workers.length), 6);
@@ -147,8 +167,9 @@ async function dispatchPoolTTS({
   onProgress?.({
     stage: 'pool-start',
     totalChunks,
+    completedCount,
     totalKeys: workers.length,
-    message: `🎙️ ElevenLabs Pool: ${workers.length} түлхүүрээр ${totalChunks} хэсгийг зэрэгцүүлэн уншиж байна...`
+    message: `🎙️ ${completedCount}/${totalChunks} хэсэг хадгалсан аудиогоос бэлэн. Үлдсэн ${queue.length} хэсгийг уншуулна...`
   });
 
   const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
@@ -174,7 +195,7 @@ async function dispatchPoolTTS({
 
   // Worker loop
   async function runWorker() {
-    while (queue.length > 0) {
+    while (queue.length > 0 && !fatalError) {
       const task = queue.shift();
       if (!task) break;
 
@@ -182,9 +203,10 @@ async function dispatchPoolTTS({
 
       // If all workers are busy or in cooldown, wait and retry
       while (!worker) {
+        if (fatalError) return;
         const anyUsable = workers.some((w) => !w.exhausted);
         if (!anyUsable) {
-          throw new Error('Бүх ElevenLabs API түлхүүрийн кредит дууссан байна. Шинэ түлхүүр нэмж үргэлжлүүлнэ үү.');
+          throw new Error(`Хэсэг ${task.index + 1} (${task.text.length} тэмдэгт)-ийг уншуулахад түлхүүр тус бүрийн кредит хүрсэнгүй. Нийлбэр үлдэгдлээр нэг хүсэлтийг төлөх боломжгүй.\n${lastQuotaError}`);
         }
         await sleep(500);
         worker = getAvailableWorker(task);
@@ -196,6 +218,7 @@ async function dispatchPoolTTS({
         stage: 'pool-chunk-start',
         chunkIndex: task.index,
         totalChunks,
+        completedCount,
         keyLabel: worker.label,
         message: `🎙️ [Хэсэг ${task.index + 1}/${totalChunks}] -> ${worker.label} уншиж байна...`
       });
@@ -214,7 +237,8 @@ async function dispatchPoolTTS({
           stability,
           similarity,
           speed,
-          file: partAudioFile
+          file: partAudioFile,
+          signal: controller.signal
         });
 
         if (!fs.existsSync(partAudioFile)) {
@@ -247,9 +271,19 @@ async function dispatchPoolTTS({
           keyUsed: worker.label
         };
 
+        // Persist each success before continuing: a later API failure must not charge it again.
+        if (cache) {
+          try { await cache.write(task.text, results[task.index]); }
+          catch (error) {
+            // Never retry paid synthesis because a local cache write failed.
+            throw Object.assign(new Error(`Аудио үүссэн боловч үргэлжлүүлэх мэдээлэл хадгалж чадсангүй: ${error.message}`), { status: 400 });
+          }
+        }
+
         completedCount++;
         worker.jobsCompleted++;
         worker.busy = false;
+        settings.updateKeyPoolQuota(worker.id, null, 'ready');
 
         onProgress?.({
           stage: 'pool-chunk-done',
@@ -261,29 +295,34 @@ async function dispatchPoolTTS({
         });
       } catch (err) {
         worker.busy = false;
+        if (fatalError) return;
         const errMsg = String(err.message || err);
-        const isRateLimit = errMsg.includes('429') || errMsg.includes('rate limit');
-        const isQuota = errMsg.includes('402') || errMsg.includes('401') || errMsg.includes('quota') || errMsg.includes('Free users');
+        const kind = classifyError(err);
+        task.retries++;
+        if (kind === 'terminal') {
+          settings.updateKeyPoolQuota(worker.id, null, err.code === 'detected_unusual_activity' ? 'blocked' : 'error');
+          throw new Error(`${worker.label}: ${errMsg}\nКредит дууссан гэж тэмдэглээгүй. API-ийн дээрх шалтгааныг шийдээд дахин оролдоно уу.`);
+        }
 
-        if (isRateLimit) {
-          worker.cooldownUntil = Date.now() + 25000;
+        if (kind === 'rate') {
+          worker.cooldownUntil = Date.now() + Math.max(25000, Math.min(err.retryAfterMs || 0, 120000));
           onProgress?.({
             stage: 'pool-chunk-failover',
             chunkIndex: task.index,
             keyLabel: worker.label,
             message: `⚠️ ${worker.label} хурдны хязгаар (429) авсан тул түр амрааж, өөр түлхүүр рүү шилжүүлж байна...`
           });
-        } else if (isQuota) {
+        } else if (kind === 'quota') {
+          lastQuotaError = `${worker.label}: ${errMsg}`;
           worker.exhausted = true;
-          settings.updateKeyPoolQuota(worker.id, null, 'exhausted');
+          settings.updateKeyPoolQuota(worker.id, null, 'insufficient');
           onProgress?.({
             stage: 'pool-chunk-failover',
             chunkIndex: task.index,
             keyLabel: worker.label,
-            message: `⚠️ ${worker.label} кредит дууссан тул дараагийн түлхүүр рүү шилжүүллээ...`
+            message: `⚠️ ${worker.label}: энэ хэсэгт кредит хүрэлцэхгүй (quota_exceeded). Дараагийн түлхүүрийг шалгаж байна...`
           });
         } else {
-          task.retries++;
           task.failedKeys.add(worker.id);
           onProgress?.({
             stage: 'pool-chunk-retry',
@@ -309,10 +348,16 @@ async function dispatchPoolTTS({
   // Launch worker threads concurrently
   const runnerPromises = [];
   for (let i = 0; i < maxConcurrency; i++) {
-    runnerPromises.push(runWorker());
+    runnerPromises.push(runWorker().catch(error => {
+      if (!fatalError) { fatalError = error; controller.abort(); }
+    }));
   }
 
   await Promise.all(runnerPromises);
+  if (fatalError) {
+    if (cache) fatalError.message += `\n${completedCount}/${totalChunks} хэсэг хадгалагдсан. Ижил текст, хоолой, тохиргоогоор дахин эхлүүлэхэд бэлэн хэсгүүдийг дахин уншуулахгүй.`;
+    throw fatalError;
+  }
 
   // Verify all parts exist
   for (let i = 0; i < totalChunks; i++) {

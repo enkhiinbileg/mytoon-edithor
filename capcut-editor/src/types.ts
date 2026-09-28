@@ -1,4 +1,4 @@
-import type { ProjectApi } from './project-types';
+import type { ProjectApi, ProjectDocument } from './project-types';
 export type MediaKind = 'video' | 'audio' | 'image' | 'unknown';
 export type TrackKind = 'video' | 'audio' | 'overlay';
 
@@ -188,7 +188,7 @@ export interface ExportSpec {
   quality?: 'draft' | 'standard' | 'high';
   format?: 'mp4' | 'mov' | 'mp3' | 'wav' | 'aac';
   audioBitrate?: '128k' | '192k' | '320k';
-  codec?: 'h264' | 'hevc' | 'av1';
+  codec?: 'h264' | 'hevc' | 'av1' | 'hevc_alpha' | 'hevc_422' | 'rle';
   bitrateMode?: 'recommended' | 'higher' | 'lower' | 'custom' | 'cbr' | 'vbr';
   customBitrate?: number;
   exportVideo?: boolean;
@@ -262,11 +262,12 @@ export interface ElevenKeyItem {
   maskedKey: string;
   enabled: boolean;
   quota?: ElevenKeyQuota | null;
-  status: 'ready' | 'busy' | 'exhausted' | 'cooldown' | 'error';
+  status: 'ready' | 'busy' | 'exhausted' | 'insufficient' | 'blocked' | 'cooldown' | 'error';
 }
 
 export interface AppSettings {
   anthropicApiKey: boolean;
+  geminiApiKey?: boolean;
   elevenLabsApiKey: boolean;
   elevenLabsKeyPool?: ElevenKeyItem[];
   azureSpeechKey?: boolean;
@@ -274,9 +275,36 @@ export interface AppSettings {
   [key: string]: unknown;
 }
 
+export interface RecapCutReport {
+  captionCount: number;
+  matchedCaptionCount: number;
+  sceneCount: number;
+  timelineStart: number;
+  timelineEnd: number;
+  voiceStart: number;
+  voiceEnd: number;
+  durationError: number;
+  alignmentMethod: string;
+  warnings: string[];
+}
+
+export type RecapCutResult = {
+  ok: true;
+  videoClips: Clip[];
+  newMedia: MediaItem[];
+  count: number;
+  motionCount: number;
+  freezeCount: number;
+  englishScenesCount: number;
+  videoDuration: number;
+  voiceDuration: number;
+  report: RecapCutReport;
+} | { ok: false; error: string };
+
 declare global {
   interface Window {
     api: ProjectApi & {
+      close(): Promise<void>;
       getElevenKeyPool(): Promise<ElevenKeyItem[]>;
       addElevenKey(key: string, label?: string): Promise<{ ok: boolean; pool?: ElevenKeyItem[]; error?: string }>;
       removeElevenKey(keyId: string): Promise<{ ok: boolean; pool?: ElevenKeyItem[]; error?: string }>;
@@ -288,6 +316,10 @@ declare global {
       renderVoiceEdit(spec:{jobId:string;plan:VoiceEditRow[]}):Promise<{ok:boolean;canceled?:boolean;error?:string;path?:string;reportPath?:string;projectPath?:string;renderSeconds?:number;encoder?:string}>;
       syncTimelineVoice(spec:{videoPath:string;voicePath:string;sourceOffset?:number;style?:'dynamic'|'sentence';method?:'auto'|'whisper'|'pause';whisperModel?:string;useVision?:boolean;geminiApiKey?:string;mode?:'freeze'|'motion'|'hybrid'}):Promise<{ok:boolean;error?:string;videoDuration?:number;voiceDuration?:number;cuts?:{id:number;sourceStart:number;sourceEnd:number;targetStart:number;targetEnd:number;duration:number;text?:string;reason?:string;freeze?:boolean;freezeImagePath?:string}[];nextSourceOffset?:number;visionAIUsed?:boolean;visionError?:string}>;
       buildScriptRecap(spec: ScriptStudioSpec): Promise<ScriptStudioResult>;
+      pickAudioFolder(): Promise<{ok:boolean;canceled?:boolean;error?:string;dir?:string;token?:string;parts?:{name:string}[]}>;
+      mergeAudioFolder(token:string): Promise<{ok:boolean;canceled?:boolean;error?:string;audioPath?:string}>;
+      scanVoiceRecovery(): Promise<{ok:boolean;error?:string;token?:string;parts?:{name:string;index:number}[];missing?:number[];ambiguous?:boolean;startedAt?:number|null}>;
+      mergeVoiceRecovery(spec:{token:string;allowGaps:boolean}): Promise<{ok:boolean;error?:string;audioPath?:string;reportPath?:string;duration?:number;count?:number;missing?:number[]}>;
       onScriptStudioProgress(cb: (p: Record<string, unknown>) => void): () => void;
       cancelVoiceEdit():Promise<boolean>;
       onVoiceEditProgress(cb:(p:Record<string,unknown>)=>void):()=>void;
@@ -307,6 +339,7 @@ declare global {
         models: { id: string; label: string; mb: number; note: string; installed: boolean }[];
       }>;
       downloadWhisperModel(model: string): Promise<string>;
+      cancelCaptionAlignment(): Promise<boolean>;
       onWhisperProgress(cb: (p: { model: string; pct: number }) => void): () => void;
 
       transcribe(spec: { mediaPath: string; model: string; language: string }): Promise<
@@ -383,13 +416,14 @@ declare global {
       openTxtFile(): Promise<{ ok: boolean; path?: string; name?: string; text?: string; error?: string } | null>;
       openAudioFileDialog(): Promise<{ ok: boolean; path?: string; name?: string; duration?: number; hasAudio?: boolean; error?: string } | null>;
       alignAudioScript(spec: {
+        whisperModel?: string;
         audioPath: string;
         scriptText?: string;
         srtPath?: string;
         minSilence?: number;
         noise?: string;
         useWhisper?: boolean;
-        mode?: 'auto' | 'whisper' | 'fast';
+        mode?: 'auto' | 'whisper' | 'fast' | 'script_captions';
       }): Promise<{
         ok: boolean;
         audioDuration?: number;
@@ -420,21 +454,14 @@ declare global {
         geminiApiKey?: string;
       }): Promise<{ ok: boolean; cuts?: any[]; nextSourceOffset?: number; error?: string }>;
       autoCutBySrt(spec: {
-        srtPath?: string;
+        srtPath: string;
         srtContent?: string;
-        captions?: any[];
-        projectData?: any;
+        captions: Clip[];
+        projectData: ProjectDocument;
         videoMediaId?: string;
-      }): Promise<{
-        ok: boolean;
-        videoClips?: Clip[];
-        count?: number;
-        englishScenesCount?: number;
-        videoDuration?: number;
-        voiceDuration?: number;
-        error?: string;
-      }>;
-      onRecapCutProgress(cb: (p: { stage?: string; message?: string }) => void): () => void;
+        requestId?: string;
+      }): Promise<RecapCutResult>;
+      onRecapCutProgress(cb: (p: { stage?: string; message?: string; requestId?: string }) => void): () => void;
       syncTimelineVoice(spec: any): Promise<any>;
       onVoiceEditProgress(cb: (p: any) => void): () => void;
       toMediaUrl(filePath: string): string;

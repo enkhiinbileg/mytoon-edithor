@@ -55,6 +55,7 @@ contextBridge.exposeInMainWorld('api', {
   openTxtFile: () => ipcRenderer.invoke('dialog:openTxt'),
   openAudioFileDialog: () => ipcRenderer.invoke('dialog:openAudioFile'),
   alignAudioScript: (spec) => ipcRenderer.invoke('audio:alignScript', spec),
+  cancelCaptionAlignment: () => ipcRenderer.invoke('audio:cancelAlign'),
   onVoiceAlignProgress: (cb) => {
     const h = (_e, p) => cb(p);
     ipcRenderer.on('voice-align:progress', h);
@@ -68,6 +69,10 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('recap-cut:progress', h);
   },
   buildScriptRecap: spec => ipcRenderer.invoke('script:buildRecap', spec),
+  scanVoiceRecovery: () => ipcRenderer.invoke('script:scanRecovery'),
+  pickAudioFolder: () => ipcRenderer.invoke('script:pickAudioFolder'),
+  mergeAudioFolder: token => ipcRenderer.invoke('script:mergeAudioFolder', token),
+  mergeVoiceRecovery: spec => ipcRenderer.invoke('script:mergeRecovery', spec),
   onScriptStudioProgress: cb => {
     const h = (_e, p) => cb(p);
     ipcRenderer.on('script:progress', h);

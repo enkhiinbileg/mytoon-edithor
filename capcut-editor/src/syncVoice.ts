@@ -263,7 +263,7 @@ export async function runAutoSyncVoice(
   curState.endGesture();
 
   const freezeCount = allAddedClips.filter((c) => {
-    const m = editor.media.find((item) => item.id === c.mediaId);
+    const m = useEditor.getState().media.find((item) => item.id === c.mediaId);
     return m?.kind === 'image';
   }).length;
   const motionCount = allAddedClips.length - freezeCount;

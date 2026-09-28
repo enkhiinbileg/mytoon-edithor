@@ -17,7 +17,26 @@ const ff = require('./ffmpeg');
 
 const MODEL_HOST = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main';
 
+function getGroqKey() {
+  if (process.env.GROQ_API_KEY) return process.env.GROQ_API_KEY;
+  const candidates = [
+    path.join(__dirname, '..', 'groq_key.txt'),
+    path.join(__dirname, 'groq_key.txt'),
+    path.join(app?.getPath ? app.getPath('userData') : '', 'groq_key.txt')
+  ];
+  for (const c of candidates) {
+    if (c && fs.existsSync(c)) {
+      try {
+        const k = fs.readFileSync(c, 'utf8').trim();
+        if (k) return k;
+      } catch {}
+    }
+  }
+  return '';
+}
+
 const MODELS = [
+  { id: 'groq-whisper-large-v3', label: '⚡ Groq Cloud (5 сек · Large v3)', mb: 0, note: 'Ultra-fast Cloud AI (Хамгийн хурдан)' },
   { id: 'tiny', label: 'Tiny', mb: 75, note: 'Fastest, roughest' },
   { id: 'base', label: 'Base', mb: 142, note: 'Good starting point' },
   { id: 'small', label: 'Small', mb: 466, note: 'Noticeably better' },
@@ -47,6 +66,7 @@ function modelDir() {
 }
 
 const modelPath = (id) => {
+  if (id.startsWith('groq')) return 'cloud';
   if (!MODELS.some(m=>m.id===id)) throw new Error('Unknown Whisper model.');
   const bundled = [path.join(process.resourcesPath || '', 'recap-tools', `ggml-${id}.bin`),path.join(__dirname, '..', 'runtime-tools', `ggml-${id}.bin`)];
   return bundled.find(p=>fs.existsSync(p)) || path.join(modelDir(), `ggml-${id}.bin`);
@@ -56,13 +76,20 @@ const modelPath = (id) => {
 function status() {
   const bin = binary();
   return {
-    available: Boolean(bin),
+    available: true,
     binary: bin,
-    models: MODELS.map((m) => ({ ...m, installed: fs.existsSync(modelPath(m.id)) }))
+    models: MODELS.map((m) => ({
+      ...m,
+      installed: m.id.startsWith('groq') ? Boolean(getGroqKey()) : (Boolean(bin) && fs.existsSync(modelPath(m.id)))
+    }))
   };
 }
 
 async function downloadModel(id, onProgress) {
+  if (id.startsWith('groq')) {
+    onProgress?.(100);
+    return 'cloud';
+  }
   const model = MODELS.find((m) => m.id === id);
   if (!model) throw new Error(`Unknown model: ${id}`);
 
@@ -118,11 +145,111 @@ function extractAudio(videoPath, { start = 0, duration, signal } = {}) {
   });
 }
 
+async function transcribeWithGroq(mediaPath, { language = 'mn', onProgress, signal, start = 0, duration, apiKey } = {}) {
+  const key = apiKey || getGroqKey();
+  if (!key) throw new Error('Groq API түлхүүр олдсонгүй. Тохиргоондоо Groq түлхүүрээ оруулна уу.');
+
+  const probe = await ff.probe(mediaPath).catch(() => null);
+  if (probe && !probe.hasAudio) {
+    return { segments: [], language: 'unknown', text: '', duration: probe.duration || 0 };
+  }
+
+  const totalDuration = duration || (probe?.duration ? Math.max(0, probe.duration - start) : 0);
+  const CHUNK_SECONDS = 1200; // 20 mins per chunk (under 5MB at 32k mono)
+  const numChunks = totalDuration > 0 ? Math.ceil(totalDuration / CHUNK_SECONDS) : 1;
+
+  const allSegments = [];
+  const lang = (language === 'auto' || !language) ? 'mn' : language;
+
+  for (let i = 0; i < numChunks; i++) {
+    signal?.throwIfAborted();
+    const chunkStart = start + i * CHUNK_SECONDS;
+    const chunkDur = totalDuration > 0 ? Math.min(CHUNK_SECONDS, totalDuration - i * CHUNK_SECONDS) : undefined;
+
+    onProgress?.({
+      stage: 'transcribe',
+      pct: Math.round(((i + 0.1) / numChunks) * 90),
+      message: numChunks > 1 ? `⚡ Groq Cloud: ${i + 1}/${numChunks} хэсгийг уншиж байна...` : '⚡ Groq Cloud: Монгол яриаг 5 секундэд таньж байна...'
+    });
+
+    const tmpChunk = path.join(os.tmpdir(), `capcut-groq-${process.pid}-${Date.now()}-${i}.mp3`);
+    try {
+      await new Promise((resolve, reject) => {
+        execFile(
+          ff.FFMPEG,
+          [
+            '-y',
+            '-ss', String(chunkStart),
+            '-i', mediaPath,
+            ...(chunkDur ? ['-t', String(chunkDur)] : []),
+            '-vn',
+            '-ac', '1',
+            '-ar', '16000',
+            '-b:a', '32k',
+            tmpChunk
+          ],
+          { maxBuffer: 1024 * 1024 * 16, windowsHide: true, signal },
+          (err, _stdout, stderr) => {
+            if (err) reject(new Error(stderr || err.message));
+            else resolve();
+          }
+        );
+      });
+
+      const fileBuffer = fs.readFileSync(tmpChunk);
+      const form = new FormData();
+      form.append('file', new Blob([fileBuffer]), `chunk_${i}.mp3`);
+      form.append('model', 'whisper-large-v3');
+      form.append('response_format', 'verbose_json');
+      form.append('language', lang);
+
+      const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${key}` },
+        body: form,
+        signal
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`Groq API алдаа (${res.status}): ${errText}`);
+      }
+
+      const data = await res.json();
+      if (Array.isArray(data.segments)) {
+        for (const seg of data.segments) {
+          const sStart = chunkStart + (seg.start ?? 0);
+          const sEnd = chunkStart + (seg.end ?? 0);
+          const text = String(seg.text || '').trim();
+          if (text && sEnd > sStart) {
+            allSegments.push({
+              id: allSegments.length,
+              start: sStart,
+              end: sEnd,
+              duration: sEnd - sStart,
+              text
+            });
+          }
+        }
+      }
+    } finally {
+      try { fs.unlinkSync(tmpChunk); } catch {}
+    }
+  }
+
+  onProgress?.({ stage: 'transcribe', pct: 100, message: '⚡ Groq танилт амжилттай дууслаа!' });
+  return { segments: allSegments, language: lang };
+}
+
 /**
  * Transcribe a media file into { id, start, end, text } segments.
  * `language` is a two-letter code, or 'auto' to detect.
  */
-async function transcribe(mediaPath, { model = 'base', language = 'auto', onProgress, start = 0, duration, signal, threads } = {}) {
+async function transcribe(mediaPath, { model = 'groq-whisper-large-v3', language = 'auto', onProgress, start = 0, duration, signal, threads, quality = false, apiKey } = {}) {
+  if (model.startsWith('groq')) {
+    return transcribeWithGroq(mediaPath, { language, onProgress, signal, start, duration, apiKey });
+  }
+
   const bin = binary();
   if (!bin) {
     throw new Error(
@@ -131,6 +258,23 @@ async function transcribe(mediaPath, { model = 'base', language = 'auto', onProg
   }
   const weights = modelPath(model);
   if (!fs.existsSync(weights)) throw new Error(`Model "${model}" is not downloaded yet.`);
+  // Reuse recognition when only caption layout or script matching changes.
+  const sourceStat = fs.statSync(mediaPath), weightStat = fs.statSync(weights);
+  const cacheKey = require('node:crypto').createHash('sha256').update(JSON.stringify({ version: 1,
+    file: path.resolve(mediaPath), size: sourceStat.size, modified: sourceStat.mtimeMs,
+    weights, weightSize: weightStat.size, weightModified: weightStat.mtimeMs, language, start, duration, quality })).digest('hex');
+  const cacheDir = path.join(path.dirname(modelDir()), 'caption-recognition-cache');
+  const cacheFile = path.join(cacheDir, cacheKey + '.json');
+  if (quality) {
+    try {
+      const saved = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+      if (saved.segments?.length && saved.segments.every(s => typeof s.text === 'string' && Number.isFinite(s.start) && Number.isFinite(s.end) && s.end > s.start)) {
+        signal?.throwIfAborted();
+        onProgress?.({ stage: 'transcribe', pct: 100, message: 'Хадгалсан ярианы танилтыг ашиглаж байна...' });
+        return saved;
+      }
+    } catch (error) { if (signal?.aborted) throw error; }
+  }
 
   const probe = await ff.probe(mediaPath).catch(() => null);
   if (probe && !probe.hasAudio) {
@@ -148,8 +292,8 @@ async function transcribe(mediaPath, { model = 'base', language = 'auto', onProg
         '-f', wav,
         '-l', language,
         '-t', String(threads || Math.max(4, Math.min(12, os.cpus().length))),
-        '-bs', '1', // 3x speedup via greedy decoding
-        '-bo', '1',
+        '-bs', quality ? '5' : '1',
+        '-bo', quality ? '5' : '1',
         '-pp',      // print progress percentage
         '--output-json',
         '-of', outBase
@@ -208,7 +352,11 @@ async function transcribe(mediaPath, { model = 'base', language = 'auto', onProg
       .filter((s) => s.text && s.end > s.start);
 
     try { fs.unlinkSync(jsonPath); } catch { /* best effort */ }
-    return { segments, language: data.result?.language ?? language };
+    const result = { segments, language: data.result?.language ?? language };
+    if (quality && segments.length && !signal?.aborted) {
+      try { fs.mkdirSync(cacheDir, { recursive: true }); fs.writeFileSync(cacheFile, JSON.stringify(result)); } catch {}
+    }
+    return result;
   } finally {
     try { fs.unlinkSync(wav); } catch { /* best effort */ }
   }

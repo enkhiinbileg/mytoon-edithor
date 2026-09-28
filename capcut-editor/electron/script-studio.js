@@ -154,15 +154,19 @@ async function buildScriptRecap(spec, progress) {
     similarity,
     speed,
     outDir: audioDir,
+    resume: true,
     onProgress: (p) => {
       progress?.({
         stage: 'tts',
-        partIndex: p.completedCount || (p.chunkIndex !== undefined ? p.chunkIndex + 1 : 0),
+        partIndex: p.completedCount,
         totalParts: p.totalChunks || scriptChunks.length,
         keyLabel: p.keyLabel,
         message: p.message
       });
     }
+  }).finally(async () => {
+    progress?.({ stage: 'quota-refresh', message: 'Кредитийн бодит үлдэгдлийг шинэчилж байна...' });
+    await pool.refreshAllQuotas().catch(() => {});
   });
 
   // Maintain strict sequential order of parts

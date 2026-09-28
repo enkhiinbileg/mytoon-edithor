@@ -1651,7 +1651,7 @@ export default function Timeline({ onRequestExport, onQuickExportSelected }: Tim
           }}
         >
           <span className="ghost-title">
-            {dragVisual.clip.name || mediaList.find((m) => m.id === dragVisual.clip.mediaId)?.name || 'Clip'} ({((dragVisual.clip.outPoint - dragVisual.clip.inPoint)).toFixed(1)}s)
+            {dragVisual.clip.label || mediaList.find((m) => m.id === dragVisual.clip.mediaId)?.name || 'Clip'} ({((dragVisual.clip.outPoint - dragVisual.clip.inPoint)).toFixed(1)}s)
           </span>
         </div>
       )}

@@ -1,5 +1,6 @@
 'use strict';
 const fs = require('node:fs');
+const { responseError } = require('./elevenlabs-errors');
 
 const API = 'https://api.elevenlabs.io/v1';
 
@@ -33,35 +34,11 @@ async function request(pathname, apiKey, init = {}) {
     headers: { 'xi-api-key': apiKey, ...(init.headers || {}) }
   });
   if (!res.ok) {
-    let detail = '';
+    let body = null;
     try {
-      detail = (await res.json())?.detail?.message || '';
+      body = await res.json();
     } catch { /* body may not be JSON */ }
-    if (res.status === 401) {
-      throw new Error(
-        'ElevenLabs rejected the key (401).' +
-          (detail ? `\n${detail}` : '') +
-          '\n\nGrant the missing permission on the ElevenLabs API-key page. Note ' +
-          'that listing voices and speaking are separate permissions — a key ' +
-          'with only Text to Speech still dubs if you paste a voice ID.'
-      );
-    }
-    if (res.status === 402) {
-      const error = new Error(
-        'ElevenLabs error 402: Free users cannot use library voices via the API.\n' +
-        'Сонгосон хоолой нь нийтийн сангийнх (Voice Library) тул Free API-аар дуудах боломжгүй байна. ' +
-        'Үндсэн Liam (Premade - 100% үнэгүй API) хоолойг сонгох эсвэл elevenlabs.io сайтаас үнэгүй уншуулж татаж авна уу.'
-      );
-      error.status = 402;
-      throw error;
-    }
-    if (res.status === 429) {
-      const error = new Error('ElevenLabs rate limit reached.');
-      error.status = 429;
-      error.retryAfterMs = Number(res.headers.get('retry-after')) * 1000 || 0;
-      throw error;
-    }
-    throw new Error(`ElevenLabs error ${res.status}${detail ? `: ${detail}` : ''}`);
+    throw responseError(res.status, body, res.headers.get('retry-after'));
   }
   return res;
 }

@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useRef } from 'react';
 import { useEditor } from '../store';
 import { importPaths } from '../importMedia';
 import type { Clip, MediaItem, Voice, ElevenKeyItem } from '../types';
@@ -109,6 +109,50 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
   const [progressMsg, setProgressMsg] = useState<string>('');
   const [progressPct, setProgressPct] = useState<number>(0);
   const [errorMsg, setErrorMsg] = useState<string>('');
+  const [recovery, setRecovery] = useState<Awaited<ReturnType<typeof window.api.scanVoiceRecovery>> | null>(null);
+  const [recoveredPath, setRecoveredPath] = useState('');
+  const [audioFolder, setAudioFolder] = useState<Awaited<ReturnType<typeof window.api.pickAudioFolder>> | null>(null);
+  const handleFolderMerge = async (merge = false) => {
+    setBusy(true); setErrorMsg('');
+    setProgressMsg(merge ? 'Аудио файлуудыг нэрийн дарааллаар нэгтгэж байна...' : 'Хавтас сонгоно уу...');
+    try {
+      if (!merge) {
+        const result = await window.api.pickAudioFolder();
+        if (!result.ok) throw new Error(result.error);
+        if (!result.canceled) { setAudioFolder(result); setRecoveredPath(''); }
+      } else if (audioFolder?.token) {
+        const result = await window.api.mergeAudioFolder(audioFolder.token);
+        if (!result.ok) throw new Error(result.error);
+        if (result.canceled) return;
+        if (result.audioPath) { setRecoveredPath(result.audioPath); await importPaths([result.audioPath]); }
+      }
+    } catch (error: any) { setErrorMsg(error.message || String(error)); }
+    finally { setBusy(false); }
+  };
+  const handleRecovery = async (merge = false) => {
+    setBusy(true); setErrorMsg('');
+    try {
+      if (!merge) {
+        setRecoveredPath('');
+        const scan = await window.api.scanVoiceRecovery();
+        if (!scan.ok) throw new Error(scan.error);
+        setRecovery(scan);
+      } else if (recovery?.token) {
+        const result = await window.api.mergeVoiceRecovery({ token: recovery.token, allowGaps: true });
+        if (!result.ok || !result.audioPath) throw new Error(result.error || 'Нэгтгэж чадсангүй.');
+        setRecoveredPath(result.audioPath);
+        await importPaths([result.audioPath]);
+      }
+    } catch (error: any) { setErrorMsg(error.message || String(error)); }
+    finally { setBusy(false); }
+  };
+  const errorRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (errorMsg) {
+      errorRef.current?.scrollIntoView({ block: 'nearest' });
+      errorRef.current?.focus({ preventScroll: true });
+    }
+  }, [errorMsg]);
 
   const { media, tracks, clips, ensureTrack, addMedia } = useEditor();
 
@@ -273,11 +317,11 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
         }
         seenUsers.add(uId);
       }
-      totalRemaining += (k.quota?.remaining ?? 10000);
-      totalLimit += (k.quota?.limit ?? 10000);
+      totalRemaining += (k.quota?.remaining ?? 0);
+      totalLimit += (k.quota?.limit ?? 0);
     }
 
-    const maxCapacity = Math.max(10000, totalRemaining);
+    const maxCapacity = activeKeyCount > 0 ? totalRemaining : 10000;
 
     const exceedsCapacity = activeKeyCount > 0 && charCount > maxCapacity;
     const exceeds10k = charCount > maxCapacity;
@@ -342,10 +386,6 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
     if (activeKeys.length === 0 && !hasApiKey) {
       setErrorMsg('ElevenLabs API түлхүүр бүртгэгдээгүй байна. "Түлхүүрийн сан" (API Key Pool) дээр дарж түлхүүр нэмнэ үү.');
       setPoolDrawerOpen(true);
-      return;
-    }
-    if (metrics.exceedsCapacity) {
-      setErrorMsg(`Скриптийн урт (${metrics.charCount.toLocaleString()} тэмдэгт) таны идэвхтэй түлхүүрүүдийн нийт үлдсэн багтаамжаас (${metrics.totalRemaining.toLocaleString()}) давсан байна. Нэмэлт түлхүүр оруулах эсвэл "Багтаамжид тааруулж таслах" товчийг дарна уу.`);
       return;
     }
     if (!isVoiceOnly && !videoPath) {
@@ -439,7 +479,6 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
 
           useEditor.getState().setPlayhead(0);
           loadVoices();
-          handleRefreshPoolQuotas();
 
           onSuccessNotice?.(`✨ AI Хоолой: ${metrics.chunks.length} хэсэг бүхий ${Math.round(audioClipDuration)}с дуу хоолой Timeline-ийн Audio зам болон Медиа санд амжилттай суулаа!`);
           onClose();
@@ -503,7 +542,6 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
 
         useEditor.getState().setPlayhead(0);
         loadVoices();
-        handleRefreshPoolQuotas();
 
         onSuccessNotice?.(`✨ AI Скрипт Студи: ${metrics.chunks.length} хэсэгт таслагдсан ${cuts.length} үзэгдэл ${Math.round(audioClipDuration)}с хоолойтойгоор timeline дээр амжилттай суулаа!`);
         onClose();
@@ -512,6 +550,7 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
       setErrorMsg(String(err?.message || err));
     } finally {
       unsub?.();
+      await window.api.getElevenKeyPool().then(setKeyPool).catch(() => {});
       setBusy(false);
     }
   };
@@ -568,7 +607,6 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
       }
       await importPaths([res.audioPath]);
       loadVoices();
-      handleRefreshPoolQuotas();
 
       onSuccessNotice?.(`💾 MP3 файл амжилттай хадгалагдаж, Медиа санд орлоо: ${savePath}`);
       onClose();
@@ -576,6 +614,7 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
       setErrorMsg(String(err?.message || err));
     } finally {
       unsub?.();
+      await window.api.getElevenKeyPool().then(setKeyPool).catch(() => {});
       setBusy(false);
     }
   };
@@ -705,6 +744,31 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
 
         {/* Modal Scrollable Body */}
         <div style={{ padding: '16px 20px', overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <section style={{ padding: 12, border: '1px solid #52525b', borderRadius: 8 }}>
+            <strong>Тасарсан хоолойн хэсгүүдийг нэгтгэх</strong>
+            <div style={{ marginTop: 10 }}>
+              <button className="btn" disabled={busy} onClick={() => handleFolderMerge()}>Хавтас сонгох — нэрээр нэгтгэх</button>
+              {audioFolder && <div>
+                <p style={{ overflowWrap: 'anywhere' }}>{audioFolder.dir} · {audioFolder.parts?.length || 0} аудио</p>
+                <p>Нэрийн дараалал: 1 → 2 → 10. Зөвхөн энэ хавтасны аудиог оруулна.</p>
+                <ol style={{ maxHeight: 160, overflow: 'auto' }}>{audioFolder.parts?.map(p => <li key={p.name}>{p.name}</li>)}</ol>
+                <button className="btn" disabled={busy || !audioFolder.parts?.length} onClick={() => handleFolderMerge(true)}>Нэрийн дарааллаар нэгтгэж хадгалах</button>
+              </div>}
+            </div>
+            <p style={{ fontSize: 12, color: '#a1a1aa' }}>Диск дээрх аудиог дугаараар нь нэгтгэнэ. Кредит зарцуулахгүй. Хуучин файлуудыг хугацаагаар бүлэглэдэг тул нэг оролдлогынх эсэхийг шалгана уу.</p>
+            <button className="btn" disabled={busy} onClick={() => handleRecovery()}>Сүүлийн аудио хэсгүүдийг шалгах</button>
+            {recovery && <div style={{ marginTop: 10, fontSize: 12 }}>
+              <p>{recovery.startedAt ? new Date(recovery.startedAt).toLocaleString() : ''} · {recovery.parts?.length || 0} хэсэг</p>
+              <p>Хэсгүүд: {recovery.parts?.map(p => p.index + 1).join(', ') || 'Олдсонгүй'}</p>
+              <p style={{ color: '#fbbf24' }}>Дутуу дугаар: {recovery.missing?.join(', ') || 'Дунд нь алга'} · Төгсгөл бүрэн эсэх тодорхойгүй.</p>
+              {recovery.ambiguous && <p style={{ color: '#f87171' }}>Давхардсан дугаартай файлууд байна. Автоматаар нэгтгэх боломжгүй.</p>}
+              <button className="btn" disabled={busy || !recovery.parts?.length || recovery.ambiguous || !!recoveredPath} onClick={() => handleRecovery(true)}>Байгаа хэсгүүдийг дарааллаар нэгтгэх</button>
+              {!!recovery.missing?.length && <p>Дутуу хэсгүүдийг алгасана. Үүсэх аудио бүрэн өгүүлэмж биш.</p>}
+            </div>}
+            {recoveredPath && <div style={{ marginTop: 10 }}>Нэгтгэсэн аудио Медиа санд орлоо.
+              <button className="btn" onClick={() => window.api.openExportPath(recoveredPath)}>Файлыг харуулах</button>
+            </div>}
+          </section>
           {/* ElevenLabs Key Pool Dashboard */}
           <div
             style={{
@@ -749,12 +813,12 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
                     </span>
                   </div>
                   <div style={{ fontSize: 11, color: '#a1a1aa', marginTop: 2 }}>
-                    Нийт үлдсэн багтаамж:{' '}
+                    Сүүлд шалгасан нийт үлдэгдэл:{' '}
                     <strong style={{ color: metrics.exceedsCapacity ? '#f87171' : '#34d399' }}>
                       {metrics.totalRemaining.toLocaleString()}
                     </strong>{' '}
                     / {metrics.totalLimit.toLocaleString()} кредит{' '}
-                    {metrics.activeKeyCount > 1 && `(${metrics.activeKeyCount}x хурдтай зэрэг уншина)`}
+                    {metrics.activeKeyCount > 1 && `(нэг дор хамгийн ихдээ ${Math.min(metrics.activeKeyCount, 6)} хэсэг)`}
                   </div>
                 </div>
               </div>
@@ -845,10 +909,21 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
                     </div>
                   ) : (
                     keyPool.map((k, idx) => {
-                      const rem = k.quota?.remaining ?? 10000;
-                      const lim = k.quota?.limit ?? 10000;
-                      const pct = Math.min(100, Math.round((rem / Math.max(1, lim)) * 100));
-                      const isExhausted = k.status === 'exhausted' || rem <= 0;
+                      const rem = k.quota?.remaining;
+                      const lim = k.quota?.limit;
+                      const hasQuota = typeof rem === 'number' && typeof lim === 'number';
+                      const pct = hasQuota ? Math.min(100, Math.round((rem / Math.max(1, lim)) * 100)) : 0;
+                      const keyStatus = k.status === 'blocked'
+                        ? { text: 'API эрх хязгаарлагдсан', color: '#f87171' }
+                        : k.status === 'error'
+                        ? { text: 'API алдаа — шалгах', color: '#fbbf24' }
+                        : hasQuota && rem <= 0
+                        ? { text: 'Кредит дууссан', color: '#f87171' }
+                        : k.status === 'insufficient'
+                        ? { text: 'Өмнөх хэсэгт кредит хүрээгүй', color: '#fbbf24' }
+                        : !hasQuota || k.status === 'exhausted'
+                        ? { text: 'Төлөв шинэчлэх шаардлагатай', color: '#fbbf24' }
+                        : { text: 'Кредиттэй', color: '#34d399' };
                       const duplicateKey = k.quota?.userId
                         ? keyPool.find((other) => other.id !== k.id && other.quota?.userId === k.quota?.userId)
                         : null;
@@ -860,7 +935,7 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
                             padding: '8px 10px',
                             borderRadius: 6,
                             background: k.enabled ? 'rgba(255,255,255,0.03)' : 'rgba(255,255,255,0.01)',
-                            border: `1px solid ${k.enabled ? (isExhausted ? 'rgba(239, 68, 68, 0.3)' : 'rgba(255,255,255,0.08)') : 'rgba(255,255,255,0.04)'}`,
+                            border: `1px solid ${k.enabled ? keyStatus.color + '55' : 'rgba(255,255,255,0.04)'}`,
                             display: 'flex',
                             alignItems: 'center',
                             justifyContent: 'space-between',
@@ -898,18 +973,12 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
                                     ⚠️ Ижил данс ({duplicateKey.label})
                                   </span>
                                 )}
-                                {isExhausted ? (
-                                  <span style={{ fontSize: 9, padding: '1px 5px', borderRadius: 6, background: 'rgba(239,68,68,0.2)', color: '#f87171' }}>
-                                    🔴 Кредит дууссан
-                                  </span>
-                                ) : (
-                                  <span style={{ fontSize: 9, padding: '1px 5px', borderRadius: 6, background: 'rgba(16,185,129,0.2)', color: '#34d399' }}>
-                                    🟢 Бэлэн
-                                  </span>
-                                )}
+                                <span style={{ fontSize: 9, padding: '1px 5px', borderRadius: 6, background: keyStatus.color + '22', color: keyStatus.color }}>
+                                  ● {keyStatus.text}
+                                </span>
                               </div>
-                              <span style={{ fontSize: 10, color: isExhausted ? '#f87171' : '#a1a1aa', marginTop: 1 }}>
-                                Үлдсэн: {rem.toLocaleString()} / {lim.toLocaleString()} кредит ({pct}%)
+                              <span style={{ fontSize: 10, color: '#a1a1aa', marginTop: 1 }} title="Сүүлд шалгасан үлдэгдэл. Кредит байгаа нь хоолой үүсгэх API эрх нээлттэйг батлахгүй.">
+                                {hasQuota ? `Үлдсэн: ${rem.toLocaleString()} / ${lim.toLocaleString()} кредит (${pct}%)` : 'Үлдэгдэл шалгагдаагүй'}
                               </span>
                             </div>
                           </div>
@@ -1215,7 +1284,7 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
                 }}
               >
                 <div style={{ fontSize: 11, color: '#fca5a5', lineHeight: 1.45 }}>
-                  <strong>⚠️ Түлхүүрүүдийн багтаамж хэтэрсэн байна:</strong> Таны скрипт {metrics.charCount.toLocaleString()} тэмдэгттэй ({ (metrics.charCount - metrics.maxCapacity).toLocaleString() } тэмдэгтээр илүү) байна. Түлхүүрийн сан дээрээ дахин түлхүүр нэмэх эсвэл доорх товчоор багтаамжид тааруулж тасна уу.
+                  <strong>⚠️ Үлдэгдэл хүрэлцэхгүй байж болзошгүй:</strong> Скрипт {metrics.charCount.toLocaleString()} тэмдэгттэй. Ижил текст, хоолой, тохиргооны хадгалсан хэсгүүдийг дахин ашиглана. Зөвхөн дутуу хэсгүүдэд кредит зарцуулна; түлхүүр тус бүрийн үлдэгдэл хүрэхгүй бол ажил зогсоно.
                 </div>
                 <button
                   type="button"
@@ -1365,7 +1434,7 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
               <button
                 type="button"
                 onClick={handleSaveMp3Directly}
-                disabled={busy || !scriptText.trim() || !hasApiKey || metrics.exceedsCapacity}
+                disabled={busy || !scriptText.trim() || !hasApiKey}
                 style={{
                   padding: '8px 14px',
                   borderRadius: 6,
@@ -1636,6 +1705,9 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
           {/* Error Message Display */}
           {errorMsg && (
             <div
+              ref={errorRef}
+              role="alert"
+              tabIndex={-1}
               style={{
                 padding: '10px 14px',
                 borderRadius: 6,
@@ -1648,8 +1720,8 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
                 gap: 8
               }}
             >
-              <div>⚠️ {errorMsg}</div>
-              {(errorMsg.includes('402') || errorMsg.includes('library voices')) && (
+              <div style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>⚠️ {errorMsg}</div>
+              {/library voices|voice.*payment|paid.*voice/i.test(errorMsg) && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
                   <button
                     type="button"
@@ -1688,7 +1760,7 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
           }}
         >
           <div style={{ fontSize: 11, color: '#71717a' }}>
-            ⚡ {metrics.maxCapacity.toLocaleString()} тэмдэгт хүртэл ({metrics.activeKeyCount} түлхүүрээр зэрэг уншина)
+            ⚡ {metrics.maxCapacity.toLocaleString()} тэмдэгт хүртэл (нэг дор хамгийн ихдээ {Math.min(metrics.activeKeyCount || 1, 6)} хэсэг)
           </div>
           <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
             <button
@@ -1705,20 +1777,20 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
               <button
                 type="button"
                 className="btn"
-                disabled={busy || !scriptText.trim() || !hasApiKey || metrics.exceedsCapacity}
+                disabled={busy || !scriptText.trim() || !hasApiKey}
                 onClick={() => handleRun(true)}
                 style={{
                   padding: '8px 24px',
                   fontSize: 13,
                   fontWeight: 700,
-                  background: (busy || metrics.exceedsCapacity || !scriptText.trim())
+                  background: (busy || !scriptText.trim())
                     ? '#3f3f46'
                     : 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
                   color: '#fff',
                   border: 'none',
                   borderRadius: 6,
-                  boxShadow: (busy || metrics.exceedsCapacity || !scriptText.trim()) ? 'none' : '0 4px 14px rgba(16, 185, 129, 0.45)',
-                  cursor: (busy || metrics.exceedsCapacity || !scriptText.trim()) ? 'default' : 'pointer',
+                  boxShadow: (busy || !scriptText.trim()) ? 'none' : '0 4px 14px rgba(16, 185, 129, 0.45)',
+                  cursor: (busy || !scriptText.trim()) ? 'default' : 'pointer',
                   display: 'flex',
                   alignItems: 'center',
                   gap: 8
@@ -1736,7 +1808,7 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
                 <button
                   type="button"
                   className="btn"
-                  disabled={busy || !scriptText.trim() || !hasApiKey || metrics.exceedsCapacity}
+                  disabled={busy || !scriptText.trim() || !hasApiKey}
                   onClick={() => handleRun(true)}
                   style={{
                     padding: '8px 14px',
@@ -1760,20 +1832,20 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
                 <button
                   type="button"
                   className="btn"
-                  disabled={busy || !scriptText.trim() || !videoPath || !hasApiKey || metrics.exceedsCapacity}
+                  disabled={busy || !scriptText.trim() || !videoPath || !hasApiKey}
                   onClick={() => handleRun(false)}
                   style={{
                     padding: '8px 22px',
                     fontSize: 13,
                     fontWeight: 650,
-                    background: (busy || metrics.exceedsCapacity || !videoPath || !scriptText.trim())
+                    background: (busy || !videoPath || !scriptText.trim())
                       ? '#3f3f46'
                       : 'linear-gradient(135deg, #6366f1 0%, #00c48c 100%)',
                     color: '#fff',
                     border: 'none',
                     borderRadius: 6,
-                    boxShadow: (busy || metrics.exceedsCapacity || !videoPath) ? 'none' : '0 4px 14px rgba(0, 196, 140, 0.4)',
-                    cursor: (busy || metrics.exceedsCapacity || !videoPath) ? 'default' : 'pointer',
+                    boxShadow: (busy || !videoPath) ? 'none' : '0 4px 14px rgba(0, 196, 140, 0.4)',
+                    cursor: (busy || !videoPath) ? 'default' : 'pointer',
                     display: 'flex',
                     alignItems: 'center',
                     gap: 8
