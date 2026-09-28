@@ -644,7 +644,7 @@ ipcMain.handle('recap:autoCutBySrt', async (_e, spec) => {
       projectData: spec.projectData,
       videoMediaId: spec.videoMediaId,
       geminiApiKey: apiKey,
-      model: 'gemini-2.5-flash',
+      model: spec.model || 'gemini-2.0-flash',
       outputDir: path.join(app.getPath('userData'), 'recap-freeze')
     }, (p) => {
       if (!_e.sender.isDestroyed()) _e.sender.send('recap-cut:progress', {
