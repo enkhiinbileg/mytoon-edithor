@@ -56,11 +56,13 @@ test('cache remaps fragmented captions using current timings and verifies source
 });
 test('Gemini rejects missing/uncertain/HTTP-error output instead of proportional guessing',async()=>{
  const spec={captions:fixture().captions,englishSrt:[{id:1,start:0,end:2,text:'English'}],videoDuration:20,apiKey:'test'};
- const response=matches=>async()=>({ok:true,json:async()=>({candidates:[{content:{parts:[{text:JSON.stringify({matches})}]}}]})});
+ const response=matches=>async(_url,options)=>({ok:true,json:async()=>options.method==='GET'
+   ? {models:[{name:'models/gemini-test-flash',supportedGenerationMethods:['generateContent']}]}
+   : {candidates:[{content:{parts:[{text:JSON.stringify({matches})}]}}]}});
  await assert.rejects(alignment.geminiAlign({...spec,apiKey:''},null,response([])),/API key/);
  await assert.rejects(alignment.geminiAlign(spec,null,response([{id:0,startId:1,endId:1,confidence:.9}])),/орхисон/);
  await assert.rejects(alignment.geminiAlign(spec,null,response([{id:0,startId:null,endId:null,confidence:0},{id:1,startId:1,endId:1,confidence:.9}])),/тодорхойгүй/);
- await assert.rejects(alignment.geminiAlign(spec,null,async()=>({ok:false,status:429})),/429/);
+ await assert.rejects(alignment.geminiAlign(spec,null,async()=>({ok:false,status:429,json:async()=>({error:{message:'Quota exceeded, limit: 0, model: gemini-test-flash'}})})),/429/);
  const good=await alignment.geminiAlign(spec,null,response([{id:0,startId:1,endId:1,confidence:.9},{id:1,startId:1,endId:1,confidence:.8}]));
  assert.equal(good.alignments.length,2);assert.equal(good.method,'gemini-semantic');
 });

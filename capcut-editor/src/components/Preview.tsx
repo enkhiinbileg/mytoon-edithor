@@ -688,25 +688,50 @@ export default function Preview() {
     return () => cancelAnimationFrame(frame);
   }, [playing]);
 
-  const active = clips.filter((c) => playhead >= c.start - 0.005 && playhead < clipEnd(c) + 0.005);
+  const clipsByTrack = useMemo(() => {
+    const map = new Map<string, Clip[]>();
+    for (const t of tracks) map.set(t.id, []);
+    for (const c of clips) {
+      const list = map.get(c.trackId);
+      if (list) list.push(c);
+    }
+    for (const list of map.values()) {
+      list.sort((a, b) => a.start - b.start);
+    }
+    return map;
+  }, [clips, tracks]);
+
+  const findActiveClipInTrack = useCallback((trackClips: Clip[], time: number): Clip | null => {
+    if (!trackClips || trackClips.length === 0) return null;
+    let low = 0, high = trackClips.length - 1;
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      const c = trackClips[mid];
+      const end = clipEnd(c);
+      if (time < c.start - 0.008) {
+        high = mid - 1;
+      } else if (time >= end + 0.008) {
+        low = mid + 1;
+      } else {
+        return c;
+      }
+    }
+    if (low > 0 && low < trackClips.length) {
+      const prev = trackClips[low - 1];
+      const next = trackClips[low];
+      if (time >= clipEnd(prev) && time < next.start && next.start - clipEnd(prev) < 0.1) {
+        return prev;
+      }
+    }
+    return null;
+  }, []);
+
   const layers = tracks
     .filter((t) => t.kind === 'video' && !t.hidden)
     .sort((a, b) => getVideoTrackLevel(a.id, tracks) - getVideoTrackLevel(b.id, tracks))
     .flatMap((t) => {
-      const trackClips = clips
-        .filter((c) => c.kind === 'av' && c.trackId === t.id)
-        .sort((a, b) => a.start - b.start);
-
-      // Find clip at playhead with generous boundary tolerance (0.008s) to prevent 1-frame floating-point voids
-      let activeClip = trackClips.find((c) => playhead >= c.start - 0.008 && playhead < clipEnd(c) + 0.008);
-
-      // If playhead fell into a sub-frame gap between adjacent clips (< 0.1s), bridge it to the closest clip
-      if (!activeClip) {
-        activeClip = trackClips.find((c, i) => {
-          const next = trackClips[i + 1];
-          return next && playhead >= clipEnd(c) && playhead < next.start && (next.start - clipEnd(c)) < 0.1;
-        });
-      }
+      const trackClips = (clipsByTrack.get(t.id) || []).filter((c) => c.kind === 'av');
+      const activeClip = findActiveClipInTrack(trackClips, playhead);
       if (!activeClip) return [];
 
       const m = media.find((item) => item.id === activeClip.mediaId);
@@ -804,8 +829,19 @@ export default function Preview() {
       return result;
     });
 
-  const overlays = tracks.filter((t) => t.kind === 'overlay' && !t.hidden).flatMap((t) => active.filter((c) => c.trackId === t.id));
-  const audio = active.filter((c) => c.kind === 'av' && tracks.some((t) => t.id === c.trackId && !t.muted && (t.kind === 'audio' || (t.kind === 'video' && !t.hidden))));
+  const overlays = tracks
+    .filter((t) => t.kind === 'overlay' && !t.hidden)
+    .flatMap((t) => {
+      const c = findActiveClipInTrack(clipsByTrack.get(t.id) || [], playhead);
+      return c ? [c] : [];
+    });
+
+  const audio = tracks
+    .filter((t) => !t.muted && (t.kind === 'audio' || (t.kind === 'video' && !t.hidden)))
+    .flatMap((t) => {
+      const c = findActiveClipInTrack(clipsByTrack.get(t.id) || [], playhead);
+      return c && c.kind === 'av' ? [c] : [];
+    });
 
   const seek = (time: number) => {
     useEditor.getState().setPlaying(false);

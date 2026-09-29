@@ -278,6 +278,8 @@ export interface AppSettings {
 export interface RecapCutReport {
   captionCount: number;
   matchedCaptionCount: number;
+  coveredCaptionCount?: number;
+  introCaptionCount?: number;
   sceneCount: number;
   timelineStart: number;
   timelineEnd: number;

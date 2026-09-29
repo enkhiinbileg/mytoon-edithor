@@ -77,11 +77,16 @@ let thumbQueueTimer: any = null;
 let activeThumbBatches = 0;
 const MAX_CONCURRENT_THUMB_BATCHES = 2;
 const thumbListeners = new Set<() => void>();
+let notifyTimer: any = null;
 
 function notifyThumbnailListeners() {
-  for (const fn of thumbListeners) {
-    try { fn(); } catch {}
-  }
+  if (notifyTimer != null) return;
+  notifyTimer = requestAnimationFrame(() => {
+    notifyTimer = null;
+    for (const fn of thumbListeners) {
+      try { fn(); } catch {}
+    }
+  });
 }
 
 function processPendingThumbQueue() {
@@ -208,13 +213,15 @@ const ClipView = memo(function ClipView({
   height,
   onPointerDown,
   onContextMenu,
-  viewport
+  viewport,
+  fastThumbs = false
 }: {
   clip: Clip;
   height: number;
   onPointerDown: (e: React.PointerEvent, clip: Clip, mode: 'move' | 'in' | 'out') => void;
   onContextMenu?: (e: React.MouseEvent, clip: Clip) => void;
   viewport: { left: number; right: number };
+  fastThumbs?: boolean;
 }) {
   const zoom = useEditor((s) => s.zoom);
   const selected = useEditor((s) => (s.selectedClipIds?.length ? s.selectedClipIds.includes(clip.id) : s.selectedClipId === clip.id));
@@ -229,7 +236,7 @@ const ClipView = memo(function ClipView({
 
   // Each thumbnail tile width in pixels (~56-64px like CapCut)
   const tileW = Math.max(48, Math.round((height - 8) * 1.25));
-  const isNarrow = width <= tileW;
+  const isNarrow = fastThumbs || width <= tileW;
 
   const clipLeft = clip.start * zoom;
   const clipRight = clipLeft + width;
@@ -468,6 +475,143 @@ const ClipView = memo(function ClipView({
   );
 });
 
+/* ------------------------------ Playhead components (isolated 60fps) ------------------------------- */
+
+const PlayheadNeedle = memo(function PlayheadNeedle({
+  zoom,
+  onPointerDown
+}: {
+  zoom: number;
+  onPointerDown: (e: React.PointerEvent) => void;
+}) {
+  const playhead = useEditor((s) => s.playhead);
+  const splitAtPlayhead = useEditor((s) => s.splitAtPlayhead);
+
+  return (
+    <div
+      className="playhead"
+      style={{ left: playhead * zoom, top: 0, bottom: 0 }}
+      onPointerDown={onPointerDown}
+      title={`Playhead: ${formatTime(playhead)}`}
+    >
+      <div
+        className="playhead-split-btn"
+        title="Таслах (Ctrl+B, B, S)"
+        onPointerDown={(e) => {
+          e.stopPropagation();
+        }}
+        onClick={(e) => {
+          e.stopPropagation();
+          splitAtPlayhead();
+        }}
+      >
+        <Icon name="split" style={{ width: 11, height: 11 }} />
+      </div>
+    </div>
+  );
+});
+
+const PlayheadFollower = memo(function PlayheadFollower({
+  zoom,
+  autoFollow,
+  scrollRef,
+  prevZoomRef,
+  skipCenterOnNextZoomRef,
+  isProgrammaticScrollRef,
+  userInteractedRef,
+  lastReportedScrollRef,
+  setViewport,
+  updateViewport
+}: {
+  zoom: number;
+  autoFollow: boolean;
+  scrollRef: React.RefObject<HTMLDivElement | null>;
+  prevZoomRef: React.MutableRefObject<number>;
+  skipCenterOnNextZoomRef: React.MutableRefObject<boolean>;
+  isProgrammaticScrollRef: React.MutableRefObject<boolean>;
+  userInteractedRef: React.MutableRefObject<boolean>;
+  lastReportedScrollRef: React.MutableRefObject<number>;
+  setViewport: React.Dispatch<React.SetStateAction<{ left: number; right: number }>>;
+  updateViewport: () => void;
+}) {
+  const playhead = useEditor((s) => s.playhead);
+  const isPlaying = useEditor((s) => s.isPlaying);
+
+  useEffect(() => {
+    if (isPlaying) {
+      userInteractedRef.current = false;
+      const el = scrollRef.current;
+      if (el && autoFollow) {
+        const playheadPx = playhead * zoom;
+        if (playheadPx < el.scrollLeft || playheadPx > el.scrollLeft + el.clientWidth) {
+          isProgrammaticScrollRef.current = true;
+          el.scrollLeft = Math.max(0, playheadPx - el.clientWidth * 0.5);
+          updateViewport();
+        }
+      }
+    } else {
+      updateViewport();
+    }
+  }, [isPlaying, autoFollow, updateViewport, zoom]);
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    const playheadPx = playhead * zoom;
+    const clientW = el.clientWidth;
+    const maxScroll = Math.max(0, el.scrollWidth - clientW);
+
+    if (prevZoomRef.current !== zoom) {
+      prevZoomRef.current = zoom;
+      if (skipCenterOnNextZoomRef.current) {
+        skipCenterOnNextZoomRef.current = false;
+        return;
+      }
+      if (maxScroll > 0) {
+        const targetScroll = Math.max(0, Math.min(maxScroll, playheadPx - clientW * 0.5));
+        isProgrammaticScrollRef.current = true;
+        userInteractedRef.current = false;
+        el.scrollLeft = targetScroll;
+        lastReportedScrollRef.current = targetScroll;
+        setViewport({ left: targetScroll, right: targetScroll + clientW });
+      }
+      return;
+    }
+
+    if (!autoFollow || maxScroll <= 0) return;
+
+    if (isPlaying) {
+      if (!userInteractedRef.current) {
+        const centerThreshold = el.scrollLeft + clientW * 0.5;
+        if (playheadPx >= centerThreshold) {
+          const targetScroll = Math.min(maxScroll, playheadPx - clientW * 0.5);
+          if (Math.abs(el.scrollLeft - targetScroll) >= 0.5) {
+            isProgrammaticScrollRef.current = true;
+            el.scrollLeft = targetScroll;
+          }
+        } else if (playheadPx < el.scrollLeft) {
+          const targetScroll = Math.max(0, playheadPx - clientW * 0.2);
+          isProgrammaticScrollRef.current = true;
+          el.scrollLeft = targetScroll;
+        }
+      }
+    } else {
+      if (!userInteractedRef.current) {
+        if (playheadPx > el.scrollLeft + clientW - 30) {
+          isProgrammaticScrollRef.current = true;
+          el.scrollLeft = Math.min(maxScroll, playheadPx - clientW + 80);
+        } else if (playheadPx < el.scrollLeft + 30) {
+          isProgrammaticScrollRef.current = true;
+          el.scrollLeft = Math.max(0, playheadPx - 80);
+        }
+      }
+    }
+  }, [playhead, isPlaying, zoom, autoFollow]);
+
+  return null;
+});
+
 /* ------------------------------ timeline ------------------------------- */
 
 interface TimelineProps {
@@ -480,7 +624,6 @@ export default function Timeline({ onRequestExport, onQuickExportSelected }: Tim
   const setZoom = useEditor((s) => s.setZoom);
   const tracks = useEditor((s) => s.tracks);
   const clips = useEditor((s) => s.clips);
-  const playhead = useEditor((s) => s.playhead);
   const isPlaying = useEditor((s) => s.isPlaying);
   const setPlayhead = useEditor((s) => s.setPlayhead);
   const setPlaying = useEditor((s) => s.setPlaying);
@@ -513,6 +656,7 @@ export default function Timeline({ onRequestExport, onQuickExportSelected }: Tim
   const mediaList = useEditor((s) => s.media);
   const [sceneDetecting, setSceneDetecting] = useState(false);
   const [viewport, setViewport] = useState({ left: 0, right: 2000 });
+  const [fastThumbs, setFastThumbs] = useState(() => clips.length > 250);
   const [dragVisual, setDragVisual] = useState<{
     clip: Clip;
     x: number;
@@ -630,87 +774,19 @@ export default function Timeline({ onRequestExport, onQuickExportSelected }: Tim
     return () => ro.disconnect();
   }, [updateViewport]);
 
-  // When playback starts or resumes, bring playhead into view if offscreen
-  useEffect(() => {
-    if (isPlaying) {
-      userInteractedRef.current = false;
-      const el = scrollRef.current;
-      if (el && autoFollow) {
-        const playheadPx = playhead * zoom;
-        if (playheadPx < el.scrollLeft || playheadPx > el.scrollLeft + el.clientWidth) {
-          isProgrammaticScrollRef.current = true;
-          el.scrollLeft = Math.max(0, playheadPx - el.clientWidth * 0.5);
-          updateViewport();
-        }
-      }
-    } else {
-      updateViewport();
+  // Memoized track clips map (avoids re-filtering and re-sorting 1200+ clips on every render)
+  const trackClipsMap = useMemo(() => {
+    const map = new Map<string, Clip[]>();
+    for (const t of tracks) map.set(t.id, []);
+    for (const c of clips) {
+      const list = map.get(c.trackId);
+      if (list) list.push(c);
     }
-  }, [isPlaying, autoFollow]);
-
-  // CapCut Playhead Following & Playhead-Centered Zoom Engine - 60fps synchronous DOM scroll before paint
-  useLayoutEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-
-    const playheadPx = playhead * zoom;
-    const clientW = el.clientWidth;
-    const maxScroll = Math.max(0, el.scrollWidth - clientW);
-
-    // 1. Playhead-Centered Zoom ("Зүүгээ голлох"):
-    // Whenever zoom level changes (slider, zoom buttons, wheel, shortcuts), center the playhead needle immediately!
-    if (prevZoomRef.current !== zoom) {
-      prevZoomRef.current = zoom;
-
-      if (skipCenterOnNextZoomRef.current) {
-        skipCenterOnNextZoomRef.current = false;
-        return;
-      }
-
-      if (maxScroll > 0) {
-        const targetScroll = Math.max(0, Math.min(maxScroll, playheadPx - clientW * 0.5));
-        isProgrammaticScrollRef.current = true;
-        userInteractedRef.current = false;
-        el.scrollLeft = targetScroll;
-        lastReportedScrollRef.current = targetScroll;
-        setViewport({ left: targetScroll, right: targetScroll + clientW });
-      }
-      return;
+    for (const list of map.values()) {
+      list.sort((a, b) => a.start - b.start);
     }
-
-    if (!autoFollow) return;
-    if (maxScroll <= 0) return;
-
-    if (isPlaying) {
-      if (!userInteractedRef.current) {
-        // CapCut behavior: When playhead reaches 50% of screen width, continuously flow the timeline
-        const centerThreshold = el.scrollLeft + clientW * 0.5;
-        if (playheadPx >= centerThreshold) {
-          const targetScroll = Math.min(maxScroll, playheadPx - clientW * 0.5);
-          if (Math.abs(el.scrollLeft - targetScroll) >= 0.5) {
-            isProgrammaticScrollRef.current = true;
-            el.scrollLeft = targetScroll;
-          }
-        } else if (playheadPx < el.scrollLeft) {
-          // Playhead jumped behind current view
-          const targetScroll = Math.max(0, playheadPx - clientW * 0.2);
-          isProgrammaticScrollRef.current = true;
-          el.scrollLeft = targetScroll;
-        }
-      }
-    } else {
-      // While paused, keep playhead in view if it steps outside
-      if (!userInteractedRef.current) {
-        if (playheadPx > el.scrollLeft + clientW - 30) {
-          isProgrammaticScrollRef.current = true;
-          el.scrollLeft = Math.min(maxScroll, playheadPx - clientW + 80);
-        } else if (playheadPx < el.scrollLeft + 30) {
-          isProgrammaticScrollRef.current = true;
-          el.scrollLeft = Math.max(0, playheadPx - 80);
-        }
-      }
-    }
-  }, [playhead, isPlaying, zoom, autoFollow]);
+    return map;
+  }, [clips, tracks]);
 
   const selectedClip = clips.find((c) => c.id === selectedClipId);
   const selectedMedia = selectedClip ? mediaList.find((m) => m.id === selectedClip.mediaId) : null;
@@ -1390,6 +1466,24 @@ export default function Timeline({ onRequestExport, onQuickExportSelected }: Tim
             >
               ▥ Том
             </button>
+            <button
+              type="button"
+              className={'icon-btn' + (fastThumbs ? ' active' : '')}
+              style={{
+                fontSize: 10,
+                padding: '3px 8px',
+                borderRadius: 3,
+                background: fastThumbs ? '#059669' : 'rgba(255,255,255,0.06)',
+                color: fastThumbs ? '#fff' : '#aaa',
+                fontWeight: fastThumbs ? 700 : 500,
+                marginLeft: 4,
+                border: '1px solid ' + (fastThumbs ? '#10b981' : 'transparent')
+              }}
+              onClick={() => setFastThumbs((v) => !v)}
+              title={fastThumbs ? 'Хурдан горим идэвхтэй: клип бүр 1 кадр харуулна (Хамгийн хөнгөн)' : 'Бүх кадруудыг дэлгэрэнгүй зурах (Хүндэрч болзошгүй)'}
+            >
+              {fastThumbs ? '⚡ Хурдан горим' : '🖼️ Дэлгэрэнгүй'}
+            </button>
           </div>
         </div>
       </div>
@@ -1401,7 +1495,7 @@ export default function Timeline({ onRequestExport, onQuickExportSelected }: Tim
           {tracks.map((t: Track) => {
             const h = getTrackHeight(t, trackHeightMode);
             const isMain = isMainVideoTrack(t.id, tracks);
-            const trackClips = clips.filter((c) => c.trackId === t.id);
+            const trackClips = trackClipsMap.get(t.id) || [];
             const canDelete = !isMain && trackClips.length === 0 && tracks.filter((x) => x.kind === t.kind).length > 1;
             const level = t.kind === 'video' ? getVideoTrackLevel(t.id, tracks) : 0;
 
@@ -1528,9 +1622,7 @@ export default function Timeline({ onRequestExport, onQuickExportSelected }: Tim
             >
               {tracks.map((t) => {
                 const h = getTrackHeight(t, trackHeightMode);
-                const trackClips = clips
-                  .filter((c) => c.trackId === t.id)
-                  .sort((a, b) => a.start - b.start);
+                const trackClips = trackClipsMap.get(t.id) || [];
 
                 const gaps: { start: number; end: number; duration: number }[] = [];
                 for (let i = 0; i < trackClips.length; i++) {
@@ -1540,6 +1632,22 @@ export default function Timeline({ onRequestExport, onQuickExportSelected }: Tim
                     gaps.push({ start: prevEnd, end: curStart, duration: curStart - prevEnd });
                   }
                 }
+
+                // Virtualization: render only clips and gaps within viewport +/- 600px buffer
+                const viewLeft = Math.max(0, viewport.left - 600);
+                const viewRight = viewport.right + 600;
+
+                const visibleGaps = gaps.filter((g) => {
+                  const gapLeft = g.start * zoom;
+                  const gapRight = gapLeft + Math.max(4, g.duration * zoom);
+                  return gapRight >= viewLeft && gapLeft <= viewRight;
+                });
+
+                const visibleClips = trackClips.filter((c) => {
+                  const clipLeft = c.start * zoom;
+                  const clipRight = clipLeft + Math.max(6, clipDuration(c) * zoom);
+                  return clipRight >= viewLeft && clipLeft <= viewRight;
+                });
 
                 return (
                   <div
@@ -1558,7 +1666,7 @@ export default function Timeline({ onRequestExport, onQuickExportSelected }: Tim
                         }}
                       />
                     )}
-                    {gaps.map((g, idx) => (
+                    {visibleGaps.map((g, idx) => (
                       <div
                         key={`gap-${idx}-${g.start}`}
                         className="track-gap"
@@ -1577,7 +1685,7 @@ export default function Timeline({ onRequestExport, onQuickExportSelected }: Tim
                         )}
                       </div>
                     ))}
-                    {trackClips.map((c) => (
+                    {visibleClips.map((c) => (
                       <ClipView
                         key={c.id}
                         clip={c}
@@ -1585,6 +1693,7 @@ export default function Timeline({ onRequestExport, onQuickExportSelected }: Tim
                         onPointerDown={onClipPointerDown}
                         onContextMenu={handleClipContextMenu}
                         viewport={viewport}
+                        fastThumbs={fastThumbs}
                       />
                     ))}
                   </div>
@@ -1617,26 +1726,19 @@ export default function Timeline({ onRequestExport, onQuickExportSelected }: Tim
             </div>
             {!clips.length&&<div className="tl-empty-hint">Drag media here to start your video</div>}
 
-            <div
-              className="playhead"
-              style={{ left: playhead * zoom, top: 0, bottom: 0 }}
-              onPointerDown={onRulerPointerDown}
-              title={`Playhead: ${formatTime(playhead)}`}
-            >
-              <div
-                className="playhead-split-btn"
-                title="Таслах (Ctrl+B, B, S)"
-                onPointerDown={(e) => {
-                  e.stopPropagation();
-                }}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  splitAtPlayhead();
-                }}
-              >
-                <Icon name="split" style={{ width: 11, height: 11 }} />
-              </div>
-            </div>
+            <PlayheadNeedle zoom={zoom} onPointerDown={onRulerPointerDown} />
+            <PlayheadFollower
+              zoom={zoom}
+              autoFollow={autoFollow}
+              scrollRef={scrollRef}
+              prevZoomRef={prevZoomRef}
+              skipCenterOnNextZoomRef={skipCenterOnNextZoomRef}
+              isProgrammaticScrollRef={isProgrammaticScrollRef}
+              userInteractedRef={userInteractedRef}
+              lastReportedScrollRef={lastReportedScrollRef}
+              setViewport={setViewport}
+              updateViewport={updateViewport}
+            />
           </div>
         </div>
       </div>

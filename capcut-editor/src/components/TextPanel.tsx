@@ -67,7 +67,7 @@ export default function TextPanel() {
     }
 
     const fixed = alignScriptToClips(text, captionClips);
-    const fixedMap = new Map(fixed.map(c => [c.id, c.style?.text || c.text || '']));
+    const fixedMap = new Map(fixed.map(c => [c.id, c.style?.text || '']));
 
     useEditor.setState(s => ({
       clips: s.clips.map(c => {
@@ -184,7 +184,7 @@ export default function TextPanel() {
       });
 
       if (!res.ok) throw new Error(res.error || 'Дүрс тайралт амжилтгүй боллоо.');
-      if (!res.videoClips.length || !res.report || res.report.matchedCaptionCount !== captionClips.length || Math.abs(res.report.durationError) > 0.000001) throw new Error('Тааруулалтын эцсийн шалгалт амжилтгүй.');
+      if (!res.videoClips.length || !res.report || (res.report.coveredCaptionCount ?? res.report.matchedCaptionCount) !== captionClips.length || Math.abs(res.report.durationError) > 0.000001) throw new Error('Тааруулалтын эцсийн шалгалт амжилтгүй.');
       const current = useEditor.getState();
       if (!mounted.current) return;
       if (current.currentProjectId !== original.currentProjectId || current.projectPath !== original.projectPath || JSON.stringify(current.snapshotProject()) !== fingerprint) throw new Error('Тааруулалтын явцад төсөл өөрчлөгдсөн. Шинэ timeline дээр дахин ажиллуулна уу.');
@@ -199,7 +199,7 @@ export default function TextPanel() {
       await flushDraft();
       if (mounted.current && useEditor.getState().clips === updated.clips) {
         setAutoCutReport(res.report);
-        setAutoCutSuccess(`${res.report.matchedCaptionCount}/${res.report.captionCount} хадмал холбогдлоо. ${res.motionCount} дүрс + ${res.freezeCount} царцсан зураг. Хугацааны зөрүү: ${(Math.abs(res.report.durationError) * 1000).toFixed(1)} мс.`);
+        setAutoCutSuccess(`${res.report.coveredCaptionCount ?? res.report.matchedCaptionCount}/${res.report.captionCount} хадмал дүрстэй боллоо. ${res.report.matchedCaptionCount} утгаар таарсан${res.report.introCaptionCount ? `, ${res.report.introCaptionCount} оршил` : ''}. ${res.motionCount} дүрс + ${res.freezeCount} царцсан зураг. Хугацааны зөрүү: ${(Math.abs(res.report.durationError) * 1000).toFixed(1)} мс.`);
       }
     } catch (err: any) {
       if (mounted.current) setAutoCutError((applied ? 'Дүрс timeline-д орсон ч хадгалалт амжилтгүй. Ctrl+S-ээр хадгалж болно. ' : '') + (err.message || String(err)));

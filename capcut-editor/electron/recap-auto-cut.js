@@ -1,5 +1,6 @@
 'use strict';
 const crypto = require('node:crypto');
+const path = require('node:path');
 const srtParser = require('./srt-parser');
 const { resolveRecapAlignments } = require('./recap-alignment');
 const { materializeFreezeFrames } = require('./recap-freeze');
@@ -63,10 +64,11 @@ function planRecapCuts(inputs, alignment) {
     if (!a || ![a.audioStart,a.audioEnd,a.videoStart,a.videoEnd].every(finite) || Math.abs(a.audioStart-c.start)>EPS || Math.abs(a.audioEnd-end(c))>EPS || a.videoStart<0 || a.videoStart>=video.duration || a.videoEnd<=a.videoStart) throw new Error('Тааруулалтын цаг одоогийн хадмал эсвэл эх видеотой нийцэхгүй байна.');
     const sourceEnd=Math.min(video.duration,a.videoEnd);
     const previous=scenes.at(-1);
-    if (previous && Math.abs(previous.sourceStart-a.videoStart)<EPS) {
+    const introHold=a.mode==='title-intro-hold';
+    if (previous && previous.introHold===introHold && Math.abs(previous.sourceStart-a.videoStart)<EPS) {
       previous.sourceEnd=Math.max(previous.sourceEnd,sourceEnd);
       previous.captions.push(c); previous.alignments.push(a);
-    } else scenes.push({sourceStart:a.videoStart,sourceEnd,start:c.start,captions:[c],alignments:[a]});
+    } else scenes.push({sourceStart:a.videoStart,sourceEnd,start:c.start,captions:[c],alignments:[a],introHold});
   }
   const cuts=[];
   const frameDuration=1/(video.fps>0?video.fps:30);
@@ -77,6 +79,10 @@ function planRecapCuts(inputs, alignment) {
     const duration=finish-start;
     const motionDuration=Math.min(duration,s.sourceEnd-s.sourceStart);
     const metadata={matchedSrtId:s.alignments[0].matchedSrtId,englishText:s.alignments.map(a=>a.englishText).filter((t,j,x)=>t && x.indexOf(t)===j).join(' '),mongolianText:s.captions.map(c=>c.style.text).join(' '),aiVerified:false,aiReason:alignment.method};
+    if (s.introHold) {
+      cuts.push({start,inPoint:0,outPoint:duration,isFreeze:true,freezeTs:s.sourceStart,...metadata,aiReason:'title-intro-hold'});
+      return;
+    }
     cuts.push({start,inPoint:s.sourceStart,outPoint:s.sourceStart+motionDuration,isFreeze:false,...metadata});
     const hold=duration-motionDuration;
     if (hold>EPS) {
@@ -111,7 +117,8 @@ async function autoCutByEnglishSrt(spec, progress, dependencies={}) {
   if (!raw.length || raw.some((s,i)=>i>0 && s.start<raw[i-1].start)) throw new Error('Англи SRT хоосон эсвэл цагийн дараалал буруу байна.');
   const englishSrt=srtParser.reconstructSentences(raw);
   progress?.({stage:'mapping',message:`${inputs.captions.length} Монгол хадмалыг ${englishSrt.length} Англи хэсэгтэй тулгаж байна…`});
-  const alignment=await (dependencies.resolveAlignments || resolveRecapAlignments)({captions:inputs.captions,englishSrt,videoDuration:inputs.video.duration,apiKey:spec.geminiApiKey,model:spec.model},progress);
+  const sourceTitle=spec.srtPath ? path.basename(spec.srtPath,'.srt').replace(/\[[^\]]*\]/g,'').trim() : '';
+  const alignment=await (dependencies.resolveAlignments || resolveRecapAlignments)({captions:inputs.captions,englishSrt,sourceTitle,videoDuration:inputs.video.duration,apiKey:spec.geminiApiKey,model:spec.model,checkpointDir:spec.checkpointDir},progress);
   const plan=planRecapCuts(inputs,alignment);
   const freezes=plan.cuts.filter(c=>c.isFreeze);
   const images=freezes.length?await (dependencies.materializeFrames || materializeFreezeFrames)({video:inputs.video,timestamps:freezes.map(c=>c.freezeTs),outputDir:spec.outputDir},p=>progress?.({...p,message:`Царцсан зураг үүсгэж байна: ${p.completed}/${p.total}`})):new Map();
@@ -124,10 +131,11 @@ async function autoCutByEnglishSrt(spec, progress, dependencies={}) {
       newMedia.push({id,path:imagePath,name:`Freeze ${c.freezeTs.toFixed(3)}s`,kind:'image',duration:86400,width:inputs.video.width,height:inputs.video.height,fps:inputs.video.fps,hasAudio:false,thumbs:[]});
     }
   }
-  const videoClips=plan.cuts.map(c=>({id:uid(),kind:'av',trackId:'v1',...c,mediaId:c.isFreeze?imageIds.get(images.get(c.freezeTs)):inputs.video.id,filterId:'none',effectId:'none',transitionId:'none',volume:0,opacity:1,sourceStart:c.isFreeze?c.freezeTs:c.inPoint,sourceEnd:c.isFreeze?c.freezeTs:c.outPoint,label:`${c.isFreeze?'❄️ ':''}[#${c.matchedSrtId}] ${c.mongolianText.slice(0,64)}`}));
+  const videoClips=plan.cuts.map(c=>({id:uid(),kind:'av',trackId:'v1',...c,mediaId:c.isFreeze?imageIds.get(images.get(c.freezeTs)):inputs.video.id,filterId:'none',effectId:'none',transitionId:'none',volume:0,opacity:1,sourceStart:c.isFreeze?c.freezeTs:c.inPoint,sourceEnd:c.isFreeze?c.freezeTs:c.outPoint,label:`${c.isFreeze?'❄️ ':''}[${c.aiReason==='title-intro-hold'?'Оршил':'#'+c.matchedSrtId}] ${c.mongolianText.slice(0,64)}`}));
   const timing=validateTimeline(videoClips,[...inputs.project.media,...newMedia],inputs.voiceStart,inputs.voiceEnd);
-  const report={...timing,captionCount:inputs.captions.length,matchedCaptionCount:alignment.alignments.length,sceneCount:plan.sceneCount,alignmentMethod:alignment.method,warnings:alignment.warnings || []};
-  progress?.({stage:'done',message:`${report.matchedCaptionCount}/${report.captionCount} хадмал холбогдлоо. Хугацааны шалгалт амжилттай.`});
+  const introCaptionCount=alignment.alignments.filter(a=>a.mode==='title-intro-hold').length;
+  const report={...timing,captionCount:inputs.captions.length,coveredCaptionCount:alignment.alignments.length,matchedCaptionCount:alignment.alignments.length-introCaptionCount,introCaptionCount,sceneCount:plan.sceneCount,alignmentMethod:alignment.method,warnings:alignment.warnings || []};
+  progress?.({stage:'done',message:`${report.coveredCaptionCount}/${report.captionCount} хадмал дүрстэй боллоо. Хугацааны шалгалт амжилттай.`});
   return {ok:true,videoClips,newMedia,count:videoClips.length,motionCount:videoClips.length-freezes.length,freezeCount:freezes.length,englishScenesCount:englishSrt.length,videoDuration:inputs.video.duration,voiceDuration:inputs.voiceEnd-inputs.voiceStart,report};
 }
 
