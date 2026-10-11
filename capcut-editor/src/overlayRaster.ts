@@ -51,16 +51,30 @@ export function rasterizeOverlay(clip: Clip, scale: number, encode = true): { da
   const st = clip.style;
   if (!st || !st.text) return null;
 
+  let textToRender = st.text;
+  if (st.textCase === 'uppercase') {
+    textToRender = textToRender.toUpperCase();
+  } else if (st.textCase === 'lowercase') {
+    textToRender = textToRender.toLowerCase();
+  } else if (st.textCase === 'capitalize') {
+    textToRender = textToRender.replace(/\b[\p{L}\p{N}]/gu, (m) => m.toUpperCase());
+  }
+
   const fontSize = Math.max(4, st.fontSize * scale);
   const fontFamily = st.fontFamily ? `"${st.fontFamily}", ${OVERLAY_FONT}` : OVERLAY_FONT;
-  const font = `${st.bold ? '800' : '500'} ${fontSize}px ${fontFamily}`;
+  const fontStyle = st.italic ? 'italic ' : 'normal ';
+  const fontWeight = st.bold ? '800 ' : '500 ';
+  const font = `${fontStyle}${fontWeight}${fontSize}px ${fontFamily}`;
 
   const probe = document.createElement('canvas').getContext('2d');
   if (!probe) return null;
   probe.font = font;
+  if (st.letterSpacing !== undefined) {
+    try { (probe as any).letterSpacing = `${st.letterSpacing * scale}px`; } catch {}
+  }
 
   // Auto-wrap lines so captions fit beautifully like CapCut
-  const lines = wrapText(st.text, 34);
+  const lines = wrapText(textToRender, 34);
 
   const m = probe.measureText('Mg');
   const textW = Math.max(1, ...lines.map(line => probe.measureText(line).width));
@@ -70,13 +84,15 @@ export function rasterizeOverlay(clip: Clip, scale: number, encode = true): { da
   const hasStroke = st.stroke !== false && (Boolean(st.stroke) || Boolean(st.strokeWidth) || !st.background);
   const strokeW = hasStroke ? Math.max(2, (st.strokeWidth || 5) * scale) : 0;
 
-  const pad = st.background ? fontSize * 0.24 : 0;
-  const blur = st.shadow ? fontSize * 0.16 : 0;
+  const pad = st.background ? (st.backgroundPadding !== undefined ? st.backgroundPadding * scale : fontSize * 0.24) : 0;
+  const blur = st.shadow ? (st.shadowBlur !== undefined ? st.shadowBlur * scale : fontSize * 0.16) : 0;
   const extraMargin = strokeW * 2;
+
+  const lineSpacingExtra = (st.lineSpacing || 0) * scale;
+  const lineHeight = fontSize * 1.18 + lineSpacingExtra;
 
   // ffmpeg's overlay filter needs even dimensions for some pixel formats.
   const w = Math.ceil((textW + pad * 2 + blur * 2 + extraMargin) / 2) * 2;
-  const lineHeight = fontSize * 1.18;
   const h = Math.ceil((ascent + descent + (lines.length - 1) * lineHeight + pad * 2 + blur * 2 + extraMargin) / 2) * 2;
 
   const canvas = document.createElement('canvas');
@@ -87,21 +103,35 @@ export function rasterizeOverlay(clip: Clip, scale: number, encode = true): { da
 
   // Resizing the canvas resets context state, so styles are set afterwards.
   ctx.font = font;
+  if (st.letterSpacing !== undefined) {
+    try { (ctx as any).letterSpacing = `${st.letterSpacing * scale}px`; } catch {}
+  }
   ctx.textBaseline = 'alphabetic';
 
   if (st.background) {
     ctx.fillStyle = st.background;
-    roundRect(ctx, blur + strokeW, blur + strokeW, w - (blur + strokeW) * 2, h - (blur + strokeW) * 2, fontSize * 0.2);
+    const roundness = st.backgroundRoundness !== undefined ? st.backgroundRoundness * scale : fontSize * 0.2;
+    roundRect(ctx, blur + strokeW, blur + strokeW, w - (blur + strokeW) * 2, h - (blur + strokeW) * 2, roundness);
     ctx.fill();
   }
 
   if (st.shadow) {
-    ctx.shadowColor = 'rgba(0, 0, 0, 0.9)';
+    ctx.shadowColor = st.shadowColor || 'rgba(0, 0, 0, 0.9)';
     ctx.shadowBlur = blur * 2;
-    ctx.shadowOffsetY = fontSize * 0.06;
+    ctx.shadowOffsetX = (st.shadowOffsetX !== undefined ? st.shadowOffsetX * scale : 0);
+    ctx.shadowOffsetY = (st.shadowOffsetY !== undefined ? st.shadowOffsetY * scale : fontSize * 0.06);
   }
 
-  ctx.textAlign = 'center';
+  const align = st.align || 'center';
+  ctx.textAlign = align === 'justify' ? 'center' : align;
+
+  let textX = w / 2;
+  if (align === 'left') {
+    textX = blur + pad + strokeW;
+  } else if (align === 'right') {
+    textX = w - (blur + pad + strokeW);
+  }
+
   const baseY = blur + pad + strokeW + ascent;
 
   // Draw CapCut signature stroke / outline
@@ -111,15 +141,44 @@ export function rasterizeOverlay(clip: Clip, scale: number, encode = true): { da
     ctx.lineJoin = 'round';
     ctx.miterLimit = 2;
     lines.forEach((line, i) => {
-      ctx.strokeText(line, w / 2, baseY + i * lineHeight);
+      ctx.strokeText(line, textX, baseY + i * lineHeight);
     });
   }
 
-  // Draw text fill
-  ctx.fillStyle = st.color || '#FFFFFF';
+  // Draw text fill (solid or multi-stop linear gradient)
+  if (st.gradientColors && st.gradientColors.length >= 2) {
+    const textTop = baseY - ascent;
+    const textBottom = baseY + (lines.length - 1) * lineHeight + descent;
+    const grad = ctx.createLinearGradient(0, textTop, 0, textBottom);
+    st.gradientColors.forEach((c, idx) => {
+      grad.addColorStop(idx / (st.gradientColors!.length - 1), c);
+    });
+    ctx.fillStyle = grad;
+  } else {
+    ctx.fillStyle = st.color || '#FFFFFF';
+  }
   lines.forEach((line, i) => {
-    ctx.fillText(line, w / 2, baseY + i * lineHeight);
+    ctx.fillText(line, textX, baseY + i * lineHeight);
   });
+
+  // Draw underline if enabled
+  if (st.underline) {
+    ctx.save();
+    ctx.strokeStyle = st.color || '#FFFFFF';
+    ctx.lineWidth = Math.max(1.5, fontSize * 0.06);
+    lines.forEach((line, i) => {
+      const lineW = probe.measureText(line).width;
+      let lineX1 = textX;
+      if (align === 'center' || align === 'justify') lineX1 = textX - lineW / 2;
+      else if (align === 'right') lineX1 = textX - lineW;
+      const y = baseY + i * lineHeight + descent * 0.5;
+      ctx.beginPath();
+      ctx.moveTo(lineX1, y);
+      ctx.lineTo(lineX1 + lineW, y);
+      ctx.stroke();
+    });
+    ctx.restore();
+  }
 
   return { dataUrl: encode ? canvas.toDataURL('image/png') : '', w, h, canvas };
 }
@@ -205,7 +264,7 @@ export async function buildOverlays(clips: Clip[], outW: number, outH: number, p
   // Paint the initial preparation state before measuring/rasterizing any text.
   await new Promise<void>(resolve => setTimeout(resolve, 0));
   preparation.signal?.throwIfAborted();
-  if (overlayClips.length > 32) return buildCompositeOverlays(overlayClips, outW, outH, preparation);
+  if (overlayClips.length > 0) return buildCompositeOverlays(overlayClips, outW, outH, preparation);
   const scale = outH / REF_H;
   const out: OverlayImage[] = [];
 

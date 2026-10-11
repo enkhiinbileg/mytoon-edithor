@@ -69,14 +69,18 @@ async function refreshAllQuotas() {
     try {
       const q = await fetchKeyQuota(it.apiKey);
       if (q.valid) {
+        const nextStatus = it.status === 'blocked'
+          ? 'blocked'
+          : (typeof q.remaining === 'number' && q.remaining <= 0)
+          ? 'exhausted'
+          : 'ready';
         settings.updateKeyPoolQuota(it.id, {
           userId: q.userId || '',
           tier: q.tier,
           used: q.used,
           limit: q.limit,
           remaining: q.remaining
-        }, it.status === 'blocked' ? 'blocked' : q.remaining <= 0 ? 'exhausted' :
-          ['insufficient', 'error'].includes(it.status) ? it.status : 'ready');
+        }, nextStatus);
       } else {
         settings.updateKeyPoolQuota(it.id, null, it.status === 'blocked' ? 'blocked' : 'error');
       }
@@ -87,15 +91,77 @@ async function refreshAllQuotas() {
 }
 
 /**
+ * Splits text into two parts at the nearest natural boundary (sentence, clause, word)
+ * such that part1 is <= maxChars.
+ */
+function splitTaskAtBoundary(text, maxChars) {
+  if (text.length <= maxChars) return null;
+  const sub = text.slice(0, maxChars);
+  const minCut = Math.max(15, Math.floor(maxChars * 0.15));
+
+  // 1. Sentence endings: . ! ? followed by whitespace
+  const sentenceMatches = [...sub.matchAll(/(?<=[.!?\n])\s+/g)];
+  if (sentenceMatches.length > 0) {
+    const last = sentenceMatches[sentenceMatches.length - 1];
+    const cutPos = last.index + last[0].length;
+    if (cutPos >= minCut) {
+      const p1 = text.slice(0, cutPos).trim();
+      const p2 = text.slice(cutPos).trim();
+      if (p1 && p2) return [p1, p2];
+    }
+  }
+
+  // 2. Clause endings: , ; : followed by whitespace
+  const clauseMatches = [...sub.matchAll(/(?<=[,;:\n])\s+/g)];
+  if (clauseMatches.length > 0) {
+    const last = clauseMatches[clauseMatches.length - 1];
+    const cutPos = last.index + last[0].length;
+    if (cutPos >= minCut) {
+      const p1 = text.slice(0, cutPos).trim();
+      const p2 = text.slice(cutPos).trim();
+      if (p1 && p2) return [p1, p2];
+    }
+  }
+
+  // 3. Word boundary: whitespace
+  const lastSpace = sub.lastIndexOf(' ');
+  if (lastSpace >= minCut) {
+    const p1 = text.slice(0, lastSpace).trim();
+    const p2 = text.slice(lastSpace).trim();
+    if (p1 && p2) return [p1, p2];
+  }
+
+  // 4. Fallback cut at maxChars if no punctuation or space matches inside minCut
+  if (maxChars >= 15) {
+    const p1 = text.slice(0, maxChars).trim();
+    const p2 = text.slice(maxChars).trim();
+    if (p1 && p2) return [p1, p2];
+  }
+
+  return null;
+}
+
+/** Lexicographical comparison for hierarchical paths */
+function comparePaths(a, b) {
+  const pA = a.path || [0];
+  const pB = b.path || [0];
+  const len = Math.min(pA.length, pB.length);
+  for (let i = 0; i < len; i++) {
+    if (pA[i] !== pB[i]) return pA[i] - pB[i];
+  }
+  return pA.length - pB.length;
+}
+
+/**
  * Pipelined Multi-Key Dispatcher:
  * Concurrently processes text chunks across an active pool of ElevenLabs API keys.
- * If a key hits 429 (Rate Limit) or 402/401 (Quota Exceeded), it immediately failovers
- * to the next available key without failing the entire synthesis.
+ * Quota-aware: allocates tasks based on remaining credits, dynamically sub-chunks
+ * tasks when remaining credits are fragmented, and safely failovers on rate-limits.
  */
 async function dispatchPoolTTS({
   chunks,
   voiceId = 'TX3LPaxmHKxFdv7VOQHJ',
-  modelId = 'eleven_v3',
+  modelId = 'eleven_v4',
   stability = 0.5,
   similarity = 0.75,
   speed = 1.0,
@@ -123,42 +189,59 @@ async function dispatchPoolTTS({
     }
   }
 
-  if (!pool || pool.length === 0) {
-    throw new Error('ElevenLabs API түлхүүр бүртгэгдээгүй байна. "Түлхүүрийн сан" дээр дарж түлхүүр нэмнэ үү.');
+  // Filter out blocked keys
+  pool = (pool || []).filter((k) => k.enabled !== false && k.status !== 'blocked');
+
+  if (pool.length === 0) {
+    throw new Error('Идэвхтэй ElevenLabs API түлхүүр олдсонгүй. "Түлхүүрийн сан" дээр дарж түлхүүр нэмнэ үү.');
   }
 
-  // State tracker for workers
-  const workers = pool.map((k, idx) => ({
-    id: k.id,
-    label: k.label || `Түлхүүр #${idx + 1}`,
-    apiKey: k.apiKey,
-    busy: false,
-    exhausted: false,
-    cooldownUntil: 0,
-    jobsCompleted: 0
-  }));
+  // State tracker for workers with real-time remaining credit balances
+  const workers = pool.map((k, idx) => {
+    const rem = (k.quota && typeof k.quota.remaining === 'number') ? k.quota.remaining : 10000;
+    return {
+      id: k.id,
+      label: k.label || `Түлхүүр #${idx + 1}`,
+      apiKey: k.apiKey,
+      busy: false,
+      exhausted: rem <= 0,
+      cooldownUntil: 0,
+      jobsCompleted: 0,
+      remaining: rem,
+      quota: k.quota ? { ...k.quota } : null
+    };
+  });
 
-  // Queue of chunks to process
-  let queue = chunks.map((text, index) => ({
-    index,
-    text,
-    retries: 0,
-    failedKeys: new Set()
-  }));
+  // Queue of chunks to process using hierarchical path tracking for strict sequencing
+  let queue = chunks
+    .map((text, index) => ({
+      path: [index],
+      text: (text || '').trim(),
+      retries: 0,
+      failedKeys: new Set()
+    }))
+    .filter((task) => Boolean(task.text));
 
-  const totalChunks = chunks.length;
-  const results = new Array(totalChunks);
+  const initialTotal = queue.length;
+  const completedResults = [];
   let completedCount = 0;
   let lastQuotaError = '';
   let fatalError = null;
   const controller = new AbortController();
   const cache = resume ? createPartCache(outDir, { voiceId, modelId, stability, similarity, speed }) : null;
+
   if (cache) {
+    const remainingTasks = [];
     for (const task of queue) {
       const hit = await cache.read(task.text);
-      if (hit) { results[task.index] = { ...hit, pIdx: task.index }; completedCount++; }
+      if (hit) {
+        completedResults.push({ ...hit, path: task.path });
+        completedCount++;
+      } else {
+        remainingTasks.push(task);
+      }
     }
-    queue = queue.filter(task => !results[task.index]);
+    queue = remainingTasks;
   }
 
   // Maximum concurrent tasks: min(workers.length, 6)
@@ -166,66 +249,158 @@ async function dispatchPoolTTS({
 
   onProgress?.({
     stage: 'pool-start',
-    totalChunks,
+    totalChunks: initialTotal,
     completedCount,
     totalKeys: workers.length,
-    message: `🎙️ ${completedCount}/${totalChunks} хэсэг хадгалсан аудиогоос бэлэн. Үлдсэн ${queue.length} хэсгийг уншуулна...`
+    message: `🎙️ ${completedCount}/${initialTotal} хэсэг бэлэн. Үлдсэн ${queue.length} хэсгийг ${workers.length} түлхүүрээр уншуулна...`
   });
 
   const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
-  // Helper to find next available worker for a specific task
+  // Helper to find next available worker with sufficient remaining credits
   function getAvailableWorker(task) {
     const now = Date.now();
-    for (const w of workers) {
-      if (w.busy) continue;
-      if (w.exhausted) continue;
-      if (w.cooldownUntil > now) continue;
-      if (task.failedKeys.has(w.id)) continue;
-      return w;
+    const reqChars = task.text.length;
+
+    const eligible = workers.filter(
+      (w) => !w.busy && !w.exhausted && w.cooldownUntil <= now && !task.failedKeys.has(w.id)
+    );
+
+    // Prefer workers with enough credits for this chunk
+    const sufficient = eligible.filter((w) => w.remaining >= reqChars);
+    if (sufficient.length > 0) {
+      // Best-fit: pick worker with smallest sufficient balance first
+      // to maximize pool utilization and preserve high-balance keys
+      sufficient.sort((a, b) => a.remaining - b.remaining);
+      return sufficient[0];
     }
-    // If all eligible workers failed on this task, allow re-trying non-busy ones
-    for (const w of workers) {
-      if (!w.busy && !w.exhausted && w.cooldownUntil <= now) {
-        return w;
-      }
-    }
+
     return null;
   }
 
   // Worker loop
   async function runWorker() {
-    while (queue.length > 0 && !fatalError) {
+    while (!fatalError) {
+      if (queue.length === 0) {
+        // If queue is empty, wait briefly if any worker is still actively synthesizing,
+        // in case an active worker fails and re-queues, or a sub-chunk is split
+        const anyBusy = workers.some((w) => w.busy);
+        if (!anyBusy) break;
+        await sleep(250);
+        continue;
+      }
+
       const task = queue.shift();
-      if (!task) break;
+      if (!task) continue;
 
       let worker = getAvailableWorker(task);
 
-      // If all workers are busy or in cooldown, wait and retry
-      while (!worker) {
-        if (fatalError) return;
-        const anyUsable = workers.some((w) => !w.exhausted);
-        if (!anyUsable) {
-          throw new Error(`Хэсэг ${task.index + 1} (${task.text.length} тэмдэгт)-ийг уншуулахад түлхүүр тус бүрийн кредит хүрсэнгүй. Нийлбэр үлдэгдлээр нэг хүсэлтийг төлөх боломжгүй.\n${lastQuotaError}`);
+      // If worker not immediately available, handle busy / fragmented credits
+      while (!worker && !fatalError) {
+        const now = Date.now();
+        const usableWorkers = workers.filter((w) => !w.exhausted && w.remaining > 0);
+
+        if (usableWorkers.length === 0) {
+          throw new Error(
+            `Бүх түлхүүрийн кредит дууссан байна. Үлдсэн хэсгийг (${task.text.length} тэмдэгт) уншуулах боломжгүй.\n${lastQuotaError}`
+          );
         }
+
+        const idleWorkers = usableWorkers.filter(
+          (w) => !w.busy && w.cooldownUntil <= now && !task.failedKeys.has(w.id)
+        );
+
+        if (idleWorkers.length > 0) {
+          const maxIdleRemaining = Math.max(...idleWorkers.map((w) => w.remaining));
+          // If task text is larger than any idle worker's balance, dynamically sub-chunk it!
+          if (task.text.length > maxIdleRemaining && maxIdleRemaining >= 20) {
+            const splitPair = splitTaskAtBoundary(task.text, Math.max(15, maxIdleRemaining - 5));
+            if (splitPair) {
+              const [part1, part2] = splitPair;
+              const subTask1 = {
+                path: [...task.path, 0],
+                text: part1,
+                retries: 0,
+                failedKeys: new Set(task.failedKeys)
+              };
+              const subTask2 = {
+                path: [...task.path, 1],
+                text: part2,
+                retries: 0,
+                failedKeys: new Set()
+              };
+              queue.unshift(subTask2);
+              queue.unshift(subTask1);
+              break; // Outer loop will shift subTask1
+            }
+          }
+        }
+
+        // If any usable workers are busy or cooling down, wait for them to finish
+        const anyBusyOrCooldown = usableWorkers.some((w) => w.busy || w.cooldownUntil > now);
+        if (anyBusyOrCooldown) {
+          queue.unshift(task);
+          await sleep(400);
+          break;
+        }
+
+        // If task failed on all available idle workers, clear failedKeys to permit retrying
+        if (task.failedKeys.size > 0 && idleWorkers.length === 0) {
+          task.failedKeys.clear();
+          worker = getAvailableWorker(task);
+          if (worker) break;
+        }
+
+        // If no workers are busy and task cannot be split into any worker's balance
+        const maxOverall = Math.max(...usableWorkers.map((w) => w.remaining));
+        if (task.text.length > maxOverall) {
+          if (maxOverall >= 20) {
+            const splitPair = splitTaskAtBoundary(task.text, Math.max(15, maxOverall - 5));
+            if (splitPair) {
+              const [part1, part2] = splitPair;
+              const subTask1 = {
+                path: [...task.path, 0],
+                text: part1,
+                retries: 0,
+                failedKeys: new Set(task.failedKeys)
+              };
+              const subTask2 = {
+                path: [...task.path, 1],
+                text: part2,
+                retries: 0,
+                failedKeys: new Set()
+              };
+              queue.unshift(subTask2);
+              queue.unshift(subTask1);
+              break;
+            }
+          }
+          throw new Error(
+            `Хэсэг (${task.text.length} тэмдэгт)-ийг уншуулахад түлхүүрүүдийн үлдэгдэл хүрэлцэхгүй байна (Хамгийн их үлдэгдэл: ${maxOverall} кредит).`
+          );
+        }
+
         await sleep(500);
         worker = getAvailableWorker(task);
       }
 
+      if (!worker) continue;
+
       worker.busy = true;
+      const displayTotal = Math.max(initialTotal, completedCount + queue.length + 1);
 
       onProgress?.({
         stage: 'pool-chunk-start',
-        chunkIndex: task.index,
-        totalChunks,
+        chunkIndex: completedCount + 1,
+        totalChunks: displayTotal,
         completedCount,
         keyLabel: worker.label,
-        message: `🎙️ [Хэсэг ${task.index + 1}/${totalChunks}] -> ${worker.label} уншиж байна...`
+        message: `🎙️ [${completedCount + 1}/${displayTotal}] -> ${worker.label} уншиж байна (${task.text.length} тэмдэгт)...`
       });
 
       const partAudioFile = path.join(
         outDir,
-        `pool_part_${task.index}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.mp3`
+        `pool_part_${task.path.join('_')}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.mp3`
       );
 
       try {
@@ -263,35 +438,50 @@ async function dispatchPoolTTS({
           }
         }
 
-        results[task.index] = {
-          pIdx: task.index,
+        const completedItem = {
+          path: task.path,
           partAudioFile,
           partDuration,
           partSentences,
           keyUsed: worker.label
         };
+        completedResults.push(completedItem);
 
-        // Persist each success before continuing: a later API failure must not charge it again.
+        // Persist each success before continuing
         if (cache) {
-          try { await cache.write(task.text, results[task.index]); }
-          catch (error) {
-            // Never retry paid synthesis because a local cache write failed.
-            throw Object.assign(new Error(`Аудио үүссэн боловч үргэлжлүүлэх мэдээлэл хадгалж чадсангүй: ${error.message}`), { status: 400 });
+          try {
+            await cache.write(task.text, completedItem);
+          } catch (error) {
+            throw Object.assign(
+              new Error(`Аудио хадгалахад алдаа гарлаа: ${error.message}`),
+              { status: 400 }
+            );
           }
         }
+
+        // Deduct credits used
+        worker.remaining = Math.max(0, worker.remaining - task.text.length);
+        if (worker.quota) {
+          worker.quota.remaining = worker.remaining;
+          worker.quota.used = (worker.quota.used || 0) + task.text.length;
+        }
+        if (worker.remaining <= 0) {
+          worker.exhausted = true;
+        }
+        const nextStatus = worker.remaining <= 0 ? 'exhausted' : 'ready';
+        settings.updateKeyPoolQuota(worker.id, worker.quota, nextStatus);
 
         completedCount++;
         worker.jobsCompleted++;
         worker.busy = false;
-        settings.updateKeyPoolQuota(worker.id, null, 'ready');
 
         onProgress?.({
           stage: 'pool-chunk-done',
-          chunkIndex: task.index,
+          chunkIndex: completedCount,
           completedCount,
-          totalChunks,
+          totalChunks: displayTotal,
           keyLabel: worker.label,
-          message: `✅ [${completedCount}/${totalChunks}] хэсэг амжилттай (${worker.label})...`
+          message: `✅ [${completedCount}/${displayTotal}] хэсэг амжилттай (${worker.label}, үлдэгдэл: ${worker.remaining.toLocaleString()})...`
         });
       } catch (err) {
         worker.busy = false;
@@ -299,48 +489,49 @@ async function dispatchPoolTTS({
         const errMsg = String(err.message || err);
         const kind = classifyError(err);
         task.retries++;
+
         if (kind === 'terminal') {
           settings.updateKeyPoolQuota(worker.id, null, err.code === 'detected_unusual_activity' ? 'blocked' : 'error');
-          throw new Error(`${worker.label}: ${errMsg}\nКредит дууссан гэж тэмдэглээгүй. API-ийн дээрх шалтгааныг шийдээд дахин оролдоно уу.`);
+          throw new Error(`${worker.label}: ${errMsg}\nAPI-ийн тохиргоог шалгана уу.`);
         }
 
         if (kind === 'rate') {
           worker.cooldownUntil = Date.now() + Math.max(25000, Math.min(err.retryAfterMs || 0, 120000));
+          task.failedKeys.add(worker.id);
           onProgress?.({
             stage: 'pool-chunk-failover',
-            chunkIndex: task.index,
             keyLabel: worker.label,
             message: `⚠️ ${worker.label} хурдны хязгаар (429) авсан тул түр амрааж, өөр түлхүүр рүү шилжүүлж байна...`
           });
         } else if (kind === 'quota') {
           lastQuotaError = `${worker.label}: ${errMsg}`;
           worker.exhausted = true;
-          settings.updateKeyPoolQuota(worker.id, null, 'insufficient');
+          worker.remaining = 0;
+          if (worker.quota) worker.quota.remaining = 0;
+          settings.updateKeyPoolQuota(worker.id, worker.quota, 'exhausted');
+          task.failedKeys.add(worker.id);
           onProgress?.({
             stage: 'pool-chunk-failover',
-            chunkIndex: task.index,
             keyLabel: worker.label,
-            message: `⚠️ ${worker.label}: энэ хэсэгт кредит хүрэлцэхгүй (quota_exceeded). Дараагийн түлхүүрийг шалгаж байна...`
+            message: `⚠️ ${worker.label} кредит дууссан (quota_exceeded). Дараагийн түлхүүр рүү шилжүүлж байна...`
           });
         } else {
           task.failedKeys.add(worker.id);
           onProgress?.({
             stage: 'pool-chunk-retry',
-            chunkIndex: task.index,
             keyLabel: worker.label,
-            message: `⚠️ Хэсэг ${task.index + 1} алдаа: ${errMsg.slice(0, 80)}. Өөр түлхүүрээр дахин оролдож байна...`
+            message: `⚠️ ${worker.label} алдаа: ${errMsg.slice(0, 80)}. Өөр түлхүүрээр дахин оролдож байна...`
           });
         }
 
         // Re-queue task to top
-        task.failedKeys.add(worker.id);
-        if (task.retries < Math.max(4, workers.length * 2)) {
+        if (task.retries < Math.max(6, workers.length * 3)) {
           queue.unshift(task);
         } else {
-          throw new Error(`Хэсэг ${task.index + 1}-ийг олон удаа оролдсон боловч уншиж чадсангүй: ${errMsg}`);
+          throw new Error(`Хэсгийг олон удаа оролдсон боловч уншиж чадсангүй: ${errMsg}`);
         }
 
-        await sleep(600);
+        await sleep(500);
       }
     }
   }
@@ -348,25 +539,32 @@ async function dispatchPoolTTS({
   // Launch worker threads concurrently
   const runnerPromises = [];
   for (let i = 0; i < maxConcurrency; i++) {
-    runnerPromises.push(runWorker().catch(error => {
-      if (!fatalError) { fatalError = error; controller.abort(); }
-    }));
+    runnerPromises.push(
+      runWorker().catch((error) => {
+        if (!fatalError) {
+          fatalError = error;
+          controller.abort();
+        }
+      })
+    );
   }
 
   await Promise.all(runnerPromises);
   if (fatalError) {
-    if (cache) fatalError.message += `\n${completedCount}/${totalChunks} хэсэг хадгалагдсан. Ижил текст, хоолой, тохиргоогоор дахин эхлүүлэхэд бэлэн хэсгүүдийг дахин уншуулахгүй.`;
+    if (cache) {
+      fatalError.message += `\n${completedCount}/${initialTotal} хэсэг хадгалагдсан. Дахин эхлүүлэхэд бэлэн хэсгүүдийг дахин уншуулахгүй.`;
+    }
     throw fatalError;
   }
 
-  // Verify all parts exist
-  for (let i = 0; i < totalChunks; i++) {
-    if (!results[i]) {
-      throw new Error(`Хэсэг ${i + 1} дутуу байна.`);
-    }
-  }
+  // Sort completed parts strictly by hierarchical path
+  completedResults.sort(comparePaths);
+  const finalResults = completedResults.map((r, i) => ({
+    ...r,
+    pIdx: i
+  }));
 
-  return results;
+  return finalResults;
 }
 
 module.exports = {

@@ -69,6 +69,28 @@ function addCachedFrame(filePath: string, key: number, url: string) {
   }
 }
 
+function addCachedFrames(filePath: string, frames: { key: number; path: string }[]) {
+  if (!frames || frames.length === 0) return;
+  let list = mediaKeysMap.get(filePath);
+  if (!list) {
+    list = [];
+    mediaKeysMap.set(filePath, list);
+  }
+  let addedAny = false;
+  for (const f of frames) {
+    const cacheKey = `${filePath}#${f.key}`;
+    if (!globalFrameCache.has(cacheKey)) {
+      globalFrameCache.set(cacheKey, window.api.toMediaUrl(f.path));
+      list.push(f.key);
+      addedAny = true;
+    }
+  }
+  if (addedAny) {
+    list.sort((a, b) => a - b);
+    notifyThumbnailListeners();
+  }
+}
+
 // Centralized thumbnail scheduler to extract frames smoothly without dropping clips or choking FFmpeg
 type PendingThumbReq = { filePath: string; timestamp: number; key: number };
 const pendingThumbQueue: PendingThumbReq[] = [];
@@ -213,15 +235,13 @@ const ClipView = memo(function ClipView({
   height,
   onPointerDown,
   onContextMenu,
-  viewport,
-  fastThumbs = false
+  viewport
 }: {
   clip: Clip;
   height: number;
   onPointerDown: (e: React.PointerEvent, clip: Clip, mode: 'move' | 'in' | 'out') => void;
   onContextMenu?: (e: React.MouseEvent, clip: Clip) => void;
   viewport: { left: number; right: number };
-  fastThumbs?: boolean;
 }) {
   const zoom = useEditor((s) => s.zoom);
   const selected = useEditor((s) => (s.selectedClipIds?.length ? s.selectedClipIds.includes(clip.id) : s.selectedClipId === clip.id));
@@ -236,7 +256,7 @@ const ClipView = memo(function ClipView({
 
   // Each thumbnail tile width in pixels (~56-64px like CapCut)
   const tileW = Math.max(48, Math.round((height - 8) * 1.25));
-  const isNarrow = fastThumbs || width <= tileW;
+  const isNarrow = width <= tileW;
 
   const clipLeft = clip.start * zoom;
   const clipRight = clipLeft + width;
@@ -258,7 +278,6 @@ const ClipView = memo(function ClipView({
     return { start, end, total };
   }, [isOverlay, media, isAudio, clipLeft, clipRight, width, viewLeft, viewRight, tileW]);
 
-  const isPlaying = useEditor((s) => s.isPlaying);
   const [frameRevision, setFrameRevision] = useState(0);
 
   // Re-render when thumbnail batch updates the cache
@@ -270,14 +289,16 @@ const ClipView = memo(function ClipView({
     };
   }, []);
 
-  const isHighPriority = selected;
+  const currentPlayhead = useEditor.getState().playhead;
+  const isUnderPlayhead = currentPlayhead >= clip.start && currentPlayhead <= clip.start + dur;
+  const isHighPriority = selected || isUnderPlayhead;
 
   // Request high-resolution frames for visible clips via the centralized queue
   useEffect(() => {
-    if (!media || isAudio || isOverlay || media.kind === 'image' || isPlaying) return;
+    if (!media || isAudio || isOverlay || media.kind === 'image') return;
     if (clipRight < viewLeft || clipLeft > viewRight) return;
 
-    // Always request the clip's exact inPoint frame (highest priority if active/selected)
+    // Always request the clip's exact inPoint frame (highest priority if active/selected or under playhead)
     requestClipThumbnail(media.path, clip.inPoint, isHighPriority);
 
     // If clip is wide and multiple tiles fit, request tile timestamps
@@ -289,7 +310,7 @@ const ClipView = memo(function ClipView({
         requestClipThumbnail(media.path, t, isHighPriority);
       }
     }
-  }, [media?.path, media?.kind, isAudio, isOverlay, isPlaying, clip.inPoint, clip.outPoint, clipLeft, clipRight, viewLeft, viewRight, isNarrow, tileW, zoom, visibleRange.start, visibleRange.end, isHighPriority]);
+  }, [media?.path, media?.kind, isAudio, isOverlay, clip.inPoint, clip.outPoint, clipLeft, clipRight, viewLeft, viewRight, isNarrow, tileW, zoom, visibleRange.start, visibleRange.end, isHighPriority]);
 
   // Generate visible tiles strictly positioned at pixel offset i * tileW
   const visibleTiles = useMemo(() => {
@@ -304,15 +325,18 @@ const ClipView = memo(function ClipView({
         const key = Math.round(clip.inPoint * 10);
         src = getNearestCachedFrame(media.path, key, 15) || '';
         if (!src) {
-          src = getNearestCachedFrame(media.path, key, 35) || '';
+          src = getNearestCachedFrame(media.path, key, 60) || '';
+        }
+        if (!src) {
+          src = getNearestCachedFrame(media.path, key, 600) || '';
         }
         if (!src && media.thumbs && media.thumbs.length > 0) {
-          const thumbStep = media.duration / media.thumbs.length;
-          const idx = Math.min(media.thumbs.length - 1, Math.max(0, Math.floor((clip.inPoint / media.duration) * media.thumbs.length)));
-          const thumbTime = (idx + 0.5) * thumbStep;
-          if (Math.abs(thumbTime - clip.inPoint) <= 4.0) {
-            src = media.thumbs[idx] || '';
-          }
+          const dur = Math.max(0.1, media.duration);
+          const idx = Math.min(media.thumbs.length - 1, Math.max(0, Math.floor((clip.inPoint / dur) * media.thumbs.length)));
+          src = media.thumbs[idx] || media.thumbs[0] || '';
+        }
+        if (!src) {
+          src = getNearestCachedFrame(media.path, key, Infinity) || media.thumbs?.[0] || '';
         }
       }
       return [{ index: 0, left: 0, src: src || '' }];
@@ -327,30 +351,35 @@ const ClipView = memo(function ClipView({
         const t = Math.min(clip.outPoint, clip.inPoint + dt);
         const key = Math.round(t * 10);
 
-        // 1. Exact or tight high-res frame from cache within 1.0 second (10 keys)
-        src = getNearestCachedFrame(media.path, key, 10) || '';
+        // 1. Exact or tight high-res frame from cache within 1.5 seconds (15 keys)
+        src = getNearestCachedFrame(media.path, key, 15) || '';
 
-        // 2. High-res frame from cache within at most 3.5s (35 keys)
+        // 2. High-res frame from cache within 6.0s (60 keys)
         if (!src) {
-          src = getNearestCachedFrame(media.path, key, 35) || '';
+          src = getNearestCachedFrame(media.path, key, 60) || '';
         }
 
-        // 3. Fallback to clip inPoint if within 4.0s
+        // 3. Nearest cached frame within 60.0s (600 keys)
+        if (!src) {
+          src = getNearestCachedFrame(media.path, key, 600) || '';
+        }
+
+        // 4. Fallback to clip inPoint if cached
         if (!src) {
           const inKey = Math.round(clip.inPoint * 10);
-          if (Math.abs(inKey - key) <= 40) {
-            src = getNearestCachedFrame(media.path, inKey, 15) || '';
-          }
+          src = getNearestCachedFrame(media.path, inKey, 100) || '';
         }
 
-        // 4. Coarse thumbnail fallback ONLY IF it is genuinely close to t (<= 4.0s)
+        // 5. Coarse overview thumbnail for this section of the media
         if (!src && media.thumbs && media.thumbs.length > 0) {
-          const thumbStep = media.duration / media.thumbs.length;
-          const idx = Math.min(media.thumbs.length - 1, Math.max(0, Math.floor((t / media.duration) * media.thumbs.length)));
-          const thumbTime = (idx + 0.5) * thumbStep;
-          if (Math.abs(thumbTime - t) <= 4.0) {
-            src = media.thumbs[idx] || '';
-          }
+          const dur = Math.max(0.1, media.duration);
+          const idx = Math.min(media.thumbs.length - 1, Math.max(0, Math.floor((t / dur) * media.thumbs.length)));
+          src = media.thumbs[idx] || media.thumbs[0] || '';
+        }
+
+        // 6. Absolute last resort: any cached frame for this media file or first thumb
+        if (!src) {
+          src = getNearestCachedFrame(media.path, key, Infinity) || media.thumbs?.[0] || '';
         }
       }
 
@@ -642,7 +671,6 @@ export default function Timeline({ onRequestExport, onQuickExportSelected }: Tim
   const addTrack = useEditor((s) => s.addTrack);
   const toggleTrackFlag = useEditor((s) => s.toggleTrackFlag);
   const trackHeightMode = useEditor((s) => s.trackHeightMode);
-  const setTrackHeightMode = useEditor((s) => s.setTrackHeightMode);
   const setTrackHeight = useEditor((s) => s.setTrackHeight);
   const deleteTrack = useEditor((s) => s.deleteTrack);
   const duration = useEditor((s) => s.duration());
@@ -654,9 +682,25 @@ export default function Timeline({ onRequestExport, onQuickExportSelected }: Tim
   const [hasGeminiKey, setHasGeminiKey] = useState(false);
   const [marquee, setMarquee] = useState<{ startX: number; startY: number; currentX: number; currentY: number } | null>(null);
   const mediaList = useEditor((s) => s.media);
+
+  // Preload existing extracted thumbnail frames from disk cache on project open or media import
+  useEffect(() => {
+    if (!window.api?.getCachedThumbnails) return;
+    let cancelled = false;
+    for (const m of mediaList) {
+      if (m.kind === 'video' && m.path) {
+        window.api.getCachedThumbnails(m.path).then((frames) => {
+          if (cancelled || !frames || frames.length === 0) return;
+          addCachedFrames(m.path, frames);
+        }).catch(() => {});
+      }
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [mediaList]);
   const [sceneDetecting, setSceneDetecting] = useState(false);
   const [viewport, setViewport] = useState({ left: 0, right: 2000 });
-  const [fastThumbs, setFastThumbs] = useState(() => clips.length > 250);
   const [dragVisual, setDragVisual] = useState<{
     clip: Clip;
     x: number;
@@ -1010,8 +1054,12 @@ export default function Timeline({ onRequestExport, onQuickExportSelected }: Tim
               let acc = 0;
               let foundTrack: Track | null = null;
               let topVideoY = -1;
+              let topOverlayY = -1;
               for (const t of state.tracks) {
                 const h = getTrackHeight(t, trackHeightMode);
+                if (t.kind === 'overlay' && topOverlayY === -1) {
+                  topOverlayY = acc;
+                }
                 if (t.kind === 'video' && topVideoY === -1) {
                   topVideoY = acc;
                 }
@@ -1021,7 +1069,15 @@ export default function Timeline({ onRequestExport, onQuickExportSelected }: Tim
                 acc += h;
               }
 
-              if (srcKind === 'video') {
+              if (srcKind === 'overlay') {
+                if (topOverlayY !== -1 && y < topOverlayY) {
+                  // Dragged above highest overlay track: auto-route/create upper overlay layer track
+                  const layerTrack = useEditor.getState().ensureLayerTrack('overlay');
+                  targetTrack = layerTrack.id;
+                } else if (foundTrack && foundTrack.kind === 'overlay' && !foundTrack.locked) {
+                  targetTrack = foundTrack.id;
+                }
+              } else if (srcKind === 'video') {
                 if (topVideoY !== -1 && y < topVideoY) {
                   // Dragged above highest video track: auto-route/create upper layer track (PIP)
                   const layerTrack = useEditor.getState().ensureLayerTrack('video');
@@ -1325,7 +1381,7 @@ export default function Timeline({ onRequestExport, onQuickExportSelected }: Tim
             boxShadow: '0 2px 10px rgba(99, 102, 241, 0.35)',
             transition: 'all 0.2s ease'
           }}
-          title="Монгол скрипт текстээс ElevenLabs v3 хоолой үүсгэж, манхва дүрсэнд 1 товшилтоор тааруулах"
+          title="Монгол скрипт текстээс ElevenLabs v4 хоолой үүсгэж, манхва дүрсэнд 1 товшилтоор тааруулах"
           onClick={() => window.dispatchEvent(new CustomEvent('open-script-studio'))}
         >
           <span style={{ fontSize: 13 }}>🎙️</span>
@@ -1355,6 +1411,50 @@ export default function Timeline({ onRequestExport, onQuickExportSelected }: Tim
         >
           <span style={{ fontSize: 13 }}>⚡</span>
           <span>Аудио + Скрипт</span>
+        </button>
+
+        <button
+          className="btn"
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            padding: '4px 12px',
+            fontSize: 12,
+            fontWeight: 600,
+            borderRadius: 6,
+            background: syncing ? '#333' : 'linear-gradient(135deg, #059669 0%, #10b981 100%)',
+            color: '#fff',
+            cursor: syncing ? 'wait' : 'pointer',
+            border: 'none',
+            lineHeight: 1.2,
+            boxShadow: '0 2px 8px rgba(16, 185, 129, 0.35)',
+            transition: 'all 0.2s ease'
+          }}
+          disabled={syncing}
+          title="Auto Sync: Video 1 дээрх бичлэгийг Audio 1 дээрх voice-той яг таг автоматаар уялдуулан тааруулах (Shift+товшилт: Дүрс зүсэх Auto Sync цэс нээх)"
+          onClick={async (e) => {
+            if (e.shiftKey) {
+              window.dispatchEvent(new CustomEvent('open-auto-sync'));
+              return;
+            }
+            if (syncing) return;
+            setSyncing(true);
+            try {
+              const ok = await runAutoSyncVoice((msg) => {
+                setSyncNotice(msg);
+                setTimeout(() => setSyncNotice(null), 6000);
+              });
+              if (!ok) {
+                window.dispatchEvent(new CustomEvent('open-auto-sync'));
+              }
+            } finally {
+              setSyncing(false);
+            }
+          }}
+        >
+          <span style={{ fontSize: 13 }}>⚡</span>
+          <span>{syncing ? 'Тааруулж байна...' : 'Auto Sync'}</span>
         </button>
 
         <div className="spacer" />
@@ -1415,76 +1515,6 @@ export default function Timeline({ onRequestExport, onQuickExportSelected }: Tim
           >
             <Icon name="zoomIn" />
           </button>
-
-          {/* CapCut Track Height Selector */}
-          <div className="tl-track-height-selector" style={{ display: 'flex', alignItems: 'center', gap: 2, background: '#1c1c24', padding: '2px 4px', borderRadius: 5, marginLeft: 8 }}>
-            <button
-              type="button"
-              className={'icon-btn' + (trackHeightMode === 'compact' ? ' active' : '')}
-              style={{
-                fontSize: 10,
-                padding: '3px 6px',
-                borderRadius: 3,
-                background: trackHeightMode === 'compact' ? 'var(--accent)' : 'transparent',
-                color: trackHeightMode === 'compact' ? '#042f2e' : '#aaa',
-                fontWeight: trackHeightMode === 'compact' ? 700 : 500
-              }}
-              onClick={() => setTrackHeightMode('compact')}
-              title="Давхаргыг жижигрүүлэх (Compact 36px) - Бүх давхаргуудыг нэг дор харах"
-            >
-              ▤ Жижиг
-            </button>
-            <button
-              type="button"
-              className={'icon-btn' + (trackHeightMode === 'normal' ? ' active' : '')}
-              style={{
-                fontSize: 10,
-                padding: '3px 6px',
-                borderRadius: 3,
-                background: trackHeightMode === 'normal' ? 'var(--accent)' : 'transparent',
-                color: trackHeightMode === 'normal' ? '#042f2e' : '#aaa',
-                fontWeight: trackHeightMode === 'normal' ? 700 : 500
-              }}
-              onClick={() => setTrackHeightMode('normal')}
-              title="Давхаргын хэвийн өндөр (Normal 58px)"
-            >
-              ▦ Хэвийн
-            </button>
-            <button
-              type="button"
-              className={'icon-btn' + (trackHeightMode === 'large' ? ' active' : '')}
-              style={{
-                fontSize: 10,
-                padding: '3px 6px',
-                borderRadius: 3,
-                background: trackHeightMode === 'large' ? 'var(--accent)' : 'transparent',
-                color: trackHeightMode === 'large' ? '#042f2e' : '#aaa',
-                fontWeight: trackHeightMode === 'large' ? 700 : 500
-              }}
-              onClick={() => setTrackHeightMode('large')}
-              title="Давхаргыг томруулах (Large 88px) - Аудио долгион ба кадруудыг томоор харах"
-            >
-              ▥ Том
-            </button>
-            <button
-              type="button"
-              className={'icon-btn' + (fastThumbs ? ' active' : '')}
-              style={{
-                fontSize: 10,
-                padding: '3px 8px',
-                borderRadius: 3,
-                background: fastThumbs ? '#059669' : 'rgba(255,255,255,0.06)',
-                color: fastThumbs ? '#fff' : '#aaa',
-                fontWeight: fastThumbs ? 700 : 500,
-                marginLeft: 4,
-                border: '1px solid ' + (fastThumbs ? '#10b981' : 'transparent')
-              }}
-              onClick={() => setFastThumbs((v) => !v)}
-              title={fastThumbs ? 'Хурдан горим идэвхтэй: клип бүр 1 кадр харуулна (Хамгийн хөнгөн)' : 'Бүх кадруудыг дэлгэрэнгүй зурах (Хүндэрч болзошгүй)'}
-            >
-              {fastThumbs ? '⚡ Хурдан горим' : '🖼️ Дэлгэрэнгүй'}
-            </button>
-          </div>
         </div>
       </div>
 
@@ -1625,11 +1655,13 @@ export default function Timeline({ onRequestExport, onQuickExportSelected }: Tim
                 const trackClips = trackClipsMap.get(t.id) || [];
 
                 const gaps: { start: number; end: number; duration: number }[] = [];
-                for (let i = 0; i < trackClips.length; i++) {
-                  const prevEnd = i === 0 ? 0 : clipEnd(trackClips[i - 1]);
-                  const curStart = trackClips[i].start;
-                  if (curStart - prevEnd > 0.08) {
-                    gaps.push({ start: prevEnd, end: curStart, duration: curStart - prevEnd });
+                if (t.kind !== 'overlay') {
+                  for (let i = 0; i < trackClips.length; i++) {
+                    const prevEnd = i === 0 ? 0 : clipEnd(trackClips[i - 1]);
+                    const curStart = trackClips[i].start;
+                    if (curStart - prevEnd > 0.08) {
+                      gaps.push({ start: prevEnd, end: curStart, duration: curStart - prevEnd });
+                    }
                   }
                 }
 
@@ -1666,7 +1698,7 @@ export default function Timeline({ onRequestExport, onQuickExportSelected }: Tim
                         }}
                       />
                     )}
-                    {visibleGaps.map((g, idx) => (
+                    {t.kind !== 'overlay' && visibleGaps.map((g, idx) => (
                       <div
                         key={`gap-${idx}-${g.start}`}
                         className="track-gap"
@@ -1693,7 +1725,6 @@ export default function Timeline({ onRequestExport, onQuickExportSelected }: Tim
                         onPointerDown={onClipPointerDown}
                         onContextMenu={handleClipContextMenu}
                         viewport={viewport}
-                        fastThumbs={fastThumbs}
                       />
                     ))}
                   </div>

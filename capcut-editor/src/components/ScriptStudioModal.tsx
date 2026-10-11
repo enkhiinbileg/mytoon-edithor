@@ -2,18 +2,19 @@ import React, { useEffect, useState, useMemo, useRef } from 'react';
 import { useEditor } from '../store';
 import { importPaths } from '../importMedia';
 import type { Clip, MediaItem, Voice, ElevenKeyItem } from '../types';
+import { autoTagMongolianScript, clearTagsFromScript } from '../utils/autoTag';
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
 const MAX_SCRIPT_CHARS = 10000;
-const CHUNK_SIZE = 2200;
+const CHUNK_SIZE = 1000;
 const DEFAULT_VOICE_ID = 'TX3LPaxmHKxFdv7VOQHJ'; // Liam (Premade - Free API compatible)
 
 /**
- * Intelligently splits script into chunks of <= maxChars (2200 characters)
+ * Intelligently splits script into chunks of <= maxChars (1000 characters)
  * keeping complete sentences, clauses and natural pauses intact.
  */
-function splitScriptIntoChunks(text: string, maxChars = 2200): string[] {
+function splitScriptIntoChunks(text: string, maxChars = 1000): string[] {
   const trimmed = (text || '').trim();
   if (!trimmed) return [];
   if (trimmed.length <= maxChars) return [trimmed];
@@ -71,6 +72,39 @@ function splitScriptIntoChunks(text: string, maxChars = 2200): string[] {
   return chunks;
 }
 
+interface AudioTagItem {
+  tag: string;
+  label: string;
+  icon: string;
+  category: 'reaction' | 'emotion' | 'tone';
+  description: string;
+}
+
+const AUDIO_TAGS: AudioTagItem[] = [
+  // Чимээ & Үйлдэл (Reactions & Sounds)
+  { tag: '[whispers]', label: 'Шивнэх', icon: '🤫', category: 'reaction', description: 'Намуухан, нууцлаг шивнэх' },
+  { tag: '[laughs]', label: 'Инээх', icon: '😄', category: 'reaction', description: 'Баяр хөөртэй инээх' },
+  { tag: '[sighs]', label: 'Санаа алдах', icon: '😮‍💨', category: 'reaction', description: 'Гүнзгий санаа алдах' },
+  { tag: '[gasp]', label: 'Цочих / Амьсгаа', icon: '😲', category: 'reaction', description: 'Гэнэтийн цочрол, амьсгаа авах' },
+  { tag: '[chuckles]', label: 'Инээмсэглэх', icon: '🤭', category: 'reaction', description: 'Аяархан догдолж инээх' },
+  { tag: '[deep breath]', label: 'Гүн амьсгаа', icon: '🫁', category: 'reaction', description: 'Гүнзгий амьсгаа авах' },
+  { tag: '[clears throat]', label: 'Хоолой засах', icon: '🗣️', category: 'reaction', description: 'Хоолойгоо засаж анхааруулах' },
+
+  // Сэтгэл хөдлөл (Emotions)
+  { tag: '[excited]', label: 'Догдолсон', icon: '🤩', category: 'emotion', description: 'Эрч хүчтэй, ихэд догдолсон' },
+  { tag: '[angry]', label: 'Ууртай', icon: '😡', category: 'emotion', description: 'Уур хилэнтэй, ширүүн өнгөөр' },
+  { tag: '[sad]', label: 'Гунигтай', icon: '😢', category: 'emotion', description: 'Гуниг харууслын өнгө аястай' },
+  { tag: '[serious]', label: 'Нухацтай', icon: '🧐', category: 'emotion', description: 'Чухал, нухацтай албаны өнгөөр' },
+  { tag: '[worried]', label: 'Зовсон / Сандарсан', icon: '😰', category: 'emotion', description: 'Айж түгшсэн, санаа зовсон' },
+  { tag: '[confident]', label: 'Итгэлтэй', icon: '😎', category: 'emotion', description: 'Өөртөө бүрэн итгэлтэй' },
+
+  // Өнгө аяс & Хэмнэл (Tone & Pace)
+  { tag: '[shouting]', label: 'Хашхирах', icon: '📢', category: 'tone', description: 'Маш чангаар хашхирах' },
+  { tag: '[softly]', label: 'Аяархан', icon: '🍃', category: 'tone', description: 'Дөлгөөн, зөөлөн аяархан ярих' },
+  { tag: '[long pause]', label: 'Түр зогсолт', icon: '⏸️', category: 'tone', description: 'Утга төгөлдөр түр зогсолт хийх' },
+  { tag: '[voice trembling]', label: 'Чичирсэн хоолой', icon: '🥺', category: 'tone', description: 'Сэтгэл хөдлөлөөс хоолой чичрэх' },
+];
+
 interface Props {
   isOpen: boolean;
   onClose: () => void;
@@ -81,10 +115,109 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
   const [scriptText, setScriptText] = useState('');
   const [voices, setVoices] = useState<Voice[]>([]);
   const [selectedVoiceId, setSelectedVoiceId] = useState<string>(DEFAULT_VOICE_ID);
-  const [modelId, setModelId] = useState<string>('eleven_v3');
+  const [modelId, setModelId] = useState<string>('eleven_v4');
   const [speed, setSpeed] = useState<number>(1.0);
   const [stability, setStability] = useState<number>(0.5);
   const [similarity, setSimilarity] = useState<number>(0.75);
+
+  // Eleven v4 Audio Tags state & ref
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [tagCategory, setTagCategory] = useState<'all' | 'reaction' | 'emotion' | 'tone'>('all');
+  const [customTagInput, setCustomTagInput] = useState<string>('');
+
+  const detectedTagsCount = useMemo(() => (scriptText.match(/\[[^\]]+\]/g) || []).length, [scriptText]);
+  const filteredTags = useMemo(
+    () => (tagCategory === 'all' ? AUDIO_TAGS : AUDIO_TAGS.filter((t) => t.category === tagCategory)),
+    [tagCategory]
+  );
+
+  const handleInsertTag = (rawTag: string) => {
+    const trimmed = rawTag.trim();
+    if (!trimmed) return;
+    const cleanTag = trimmed.startsWith('[') && trimmed.endsWith(']') ? trimmed : `[${trimmed.replace(/^\[|\]$/g, '')}]`;
+    const textarea = textareaRef.current;
+    if (!textarea) {
+      setScriptText((prev) => (prev ? `${prev} ${cleanTag} ` : `${cleanTag} `));
+      return;
+    }
+    const start = textarea.selectionStart ?? scriptText.length;
+    const end = textarea.selectionEnd ?? scriptText.length;
+    const before = scriptText.substring(0, start);
+    const after = scriptText.substring(end);
+    const selected = scriptText.substring(start, end);
+
+    const toInsert = selected ? `${cleanTag} ${selected}` : `${cleanTag} `;
+    const next = before + toInsert + after;
+    setScriptText(next);
+
+    setTimeout(() => {
+      textarea.focus();
+      const newPos = start + toInsert.length;
+      textarea.setSelectionRange(newPos, newPos);
+    }, 0);
+  };
+
+  // Auto-Tag state & handlers
+  const [autoTagIntensity, setAutoTagIntensity] = useState<'balanced' | 'dramatic'>('balanced');
+  const [lastUntaggedText, setLastUntaggedText] = useState<string | null>(null);
+  const [autoTagNotice, setAutoTagNotice] = useState<string | null>(null);
+
+  const handleRunAutoTag = (overrideIntensity?: 'balanced' | 'dramatic') => {
+    const intensity = overrideIntensity || autoTagIntensity;
+    const textarea = textareaRef.current;
+    const start = textarea?.selectionStart ?? 0;
+    const end = textarea?.selectionEnd ?? 0;
+    const hasSelection = end > start && scriptText.substring(start, end).trim().length > 0;
+
+    if (!scriptText.trim()) {
+      setErrorMsg('Эхлээд Монгол тайлбар / зохиолын текстээ оруулна уу.');
+      return;
+    }
+
+    setLastUntaggedText(scriptText);
+
+    if (hasSelection) {
+      const selectedText = scriptText.substring(start, end);
+      const res = autoTagMongolianScript(selectedText, { intensity });
+      if (res.tagsAdded === 0) {
+        setAutoTagNotice('ℹ️ Сонгосон хэсэгт шинэ сэтгэл хөдлөл, үйлдэл илэрсэнгүй.');
+      } else {
+        const next = scriptText.substring(0, start) + res.text + scriptText.substring(end);
+        setScriptText(next);
+        const top = Object.entries(res.breakdown).map(([t, c]) => `${t}×${c}`).slice(0, 4).join(', ');
+        setAutoTagNotice(`✨ Сонгосон хэсэгт ${res.tagsAdded} аудио таг нэмэгдлээ! ${top}`);
+      }
+    } else {
+      const res = autoTagMongolianScript(scriptText, { intensity });
+      if (res.tagsAdded === 0) {
+        setAutoTagNotice('ℹ️ Текстэд нэмэлт сэтгэл хөдлөл, үйлдэл илэрсэнгүй эсвэл аль хэдийн таглагдсан байна.');
+      } else {
+        setScriptText(res.text);
+        const top = Object.entries(res.breakdown).map(([t, c]) => `${t}×${c}`).slice(0, 5).join(', ');
+        setAutoTagNotice(`✨ Бүх текстэд нийт ${res.tagsAdded} аудио таг амжилттай нэмэгдлээ! (${top})`);
+      }
+    }
+
+    setTimeout(() => setAutoTagNotice(null), 7000);
+  };
+
+  const handleClearAllTags = () => {
+    if (!detectedTagsCount) return;
+    setLastUntaggedText(scriptText);
+    const { text, removedCount } = clearTagsFromScript(scriptText);
+    setScriptText(text);
+    setAutoTagNotice(`🧹 Нийт ${removedCount} аудио таг арилгагдлаа.`);
+    setTimeout(() => setAutoTagNotice(null), 4000);
+  };
+
+  const handleUndoAutoTag = () => {
+    if (lastUntaggedText !== null) {
+      setScriptText(lastUntaggedText);
+      setLastUntaggedText(null);
+      setAutoTagNotice('↩️ Текст өмнөх хэлбэртээ буцлаа.');
+      setTimeout(() => setAutoTagNotice(null), 4000);
+    }
+  };
 
   // Multi-API Key Pool & Credit tracking
   const [keyPool, setKeyPool] = useState<ElevenKeyItem[]>([]);
@@ -720,7 +853,7 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
               <span style={{ fontSize: 11, color: '#8e929d' }}>
                 {studioMode === 'voice_only'
                   ? 'Монгол тайлбар ➔ Multi-Key зэрэгцээ уншилт ➔ Студи чанартай хоолойг Timeline Audio замд оруулах'
-                  : 'Монгол тайлбар ➔ Multi-Key зэрэгцээ хуваарилалт ➔ ElevenLabs v3 хоолой ➔ Видеог зөв дарааллаар нь тааруулах'}
+                  : 'Монгол тайлбар ➔ Multi-Key зэрэгцээ хуваарилалт ➔ ElevenLabs v4 / v3 хоолой ➔ Видеог зөв дарааллаар нь тааруулах'}
               </span>
             </div>
           </div>
@@ -758,11 +891,17 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
             <p style={{ fontSize: 12, color: '#a1a1aa' }}>Диск дээрх аудиог дугаараар нь нэгтгэнэ. Кредит зарцуулахгүй. Хуучин файлуудыг хугацаагаар бүлэглэдэг тул нэг оролдлогынх эсэхийг шалгана уу.</p>
             <button className="btn" disabled={busy} onClick={() => handleRecovery()}>Сүүлийн аудио хэсгүүдийг шалгах</button>
             {recovery && <div style={{ marginTop: 10, fontSize: 12 }}>
-              <p>{recovery.startedAt ? new Date(recovery.startedAt).toLocaleString() : ''} · {recovery.parts?.length || 0} хэсэг</p>
-              <p>Хэсгүүд: {recovery.parts?.map(p => p.index + 1).join(', ') || 'Олдсонгүй'}</p>
-              <p style={{ color: '#fbbf24' }}>Дутуу дугаар: {recovery.missing?.join(', ') || 'Дунд нь алга'} · Төгсгөл бүрэн эсэх тодорхойгүй.</p>
+              <p>{recovery.startedAt ? new Date(recovery.startedAt).toLocaleString() : ''} · {recovery.parts?.length || 0} аудио файл бэлэн</p>
+              <p>Хэсгүүд: {recovery.parts?.map((p: any) => p.indexLabel || p.index + 1).join(', ') || 'Олдсонгүй'}</p>
+              {(recovery.missing?.length || 0) > 0 ? (
+                <p style={{ color: '#fbbf24' }}>Дутуу дугаар: {recovery.missing?.join(', ')} · Төгсгөл бүрэн эсэх тодорхойгүй.</p>
+              ) : (
+                <p style={{ color: '#34d399', fontWeight: 600 }}>✅ Бүх {recovery.parts?.length} хэсэг бүрэн байна (Дутуу дугаар байхгүй)!</p>
+              )}
               {recovery.ambiguous && <p style={{ color: '#f87171' }}>Давхардсан дугаартай файлууд байна. Автоматаар нэгтгэх боломжгүй.</p>}
-              <button className="btn" disabled={busy || !recovery.parts?.length || recovery.ambiguous || !!recoveredPath} onClick={() => handleRecovery(true)}>Байгаа хэсгүүдийг дарааллаар нэгтгэх</button>
+              <button className="btn" disabled={busy || !recovery.parts?.length || recovery.ambiguous || !!recoveredPath} onClick={() => handleRecovery(true)}>
+                {(recovery.missing?.length || 0) > 0 ? 'Байгаа хэсгүүдийг дарааллаар нэгтгэх' : '✨ Бүх хэсгийг нэгтгэж Медиа санд оруулах'}
+              </button>
               {!!recovery.missing?.length && <p>Дутуу хэсгүүдийг алгасана. Үүсэх аудио бүрэн өгүүлэмж биш.</p>}
             </div>}
             {recoveredPath && <div style={{ marginTop: 10 }}>Нэгтгэсэн аудио Медиа санд орлоо.
@@ -919,8 +1058,8 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
                         ? { text: 'API алдаа — шалгах', color: '#fbbf24' }
                         : hasQuota && rem <= 0
                         ? { text: 'Кредит дууссан', color: '#f87171' }
-                        : k.status === 'insufficient'
-                        ? { text: 'Өмнөх хэсэгт кредит хүрээгүй', color: '#fbbf24' }
+                        : hasQuota && rem > 0
+                        ? { text: `${rem.toLocaleString()} кредит бэлэн`, color: '#34d399' }
                         : !hasQuota || k.status === 'exhausted'
                         ? { text: 'Төлөв шинэчлэх шаардлагатай', color: '#fbbf24' }
                         : { text: 'Кредиттэй', color: '#34d399' };
@@ -1201,16 +1340,339 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
               </div>
             </div>
 
+            {/* Eleven v4 Audio Tags Toolbar */}
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 7,
+                padding: '9px 11px',
+                borderRadius: 8,
+                background: 'linear-gradient(135deg, rgba(99, 102, 241, 0.08) 0%, rgba(168, 85, 247, 0.06) 100%)',
+                border: '1px solid rgba(99, 102, 241, 0.25)'
+              }}
+            >
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: 6
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ fontSize: 13 }}>🏷️</span>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: '#e0e7ff' }}>
+                    Аудио Таг (Eleven v4):
+                  </span>
+                  <span
+                    style={{
+                      fontSize: 10,
+                      color: '#a5b4fc',
+                      background: 'rgba(99, 102, 241, 0.2)',
+                      padding: '1px 6px',
+                      borderRadius: 4,
+                      fontWeight: 500
+                    }}
+                  >
+                    {modelId.startsWith('eleven_v4') ? 'v4 Жүжиглэлт идэвхтэй' : 'Eleven v4 санал болгоно'}
+                  </span>
+                  {detectedTagsCount > 0 && (
+                    <span
+                      style={{
+                        fontSize: 10,
+                        color: '#34d399',
+                        background: 'rgba(16, 185, 129, 0.15)',
+                        border: '1px solid rgba(16, 185, 129, 0.35)',
+                        padding: '1px 6px',
+                        borderRadius: 4,
+                        fontWeight: 600
+                      }}
+                    >
+                      ✓ {detectedTagsCount} таг бичвэрт орсон
+                    </span>
+                  )}
+                </div>
+
+                {/* Actions & Category Filters */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+                  {/* Auto Tag Quick Action */}
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => handleRunAutoTag()}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 5,
+                      padding: '3px 10px',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      borderRadius: 5,
+                      border: '1px solid rgba(245, 158, 11, 0.55)',
+                      background: 'linear-gradient(135deg, rgba(245, 158, 11, 0.3) 0%, rgba(217, 119, 6, 0.22) 100%)',
+                      color: '#fbbf24',
+                      cursor: 'pointer',
+                      boxShadow: '0 1px 6px rgba(245, 158, 11, 0.2)',
+                      transition: 'all 0.15s ease'
+                    }}
+                    title="Монгол скриптийг шинжилж сэтгэл хөдлөл, үйлдэл, харилцан ярианд тохирох аудио тагуудыг автоматаар оруулах (Сонгосон хэсэгт эсвэл бүх текстэд)"
+                  >
+                    <span>✨</span>
+                    <span>Авто Таг (Auto Tag)</span>
+                  </button>
+
+                  <select
+                    value={autoTagIntensity}
+                    onChange={(e) => setAutoTagIntensity(e.target.value as any)}
+                    disabled={busy}
+                    style={{
+                      padding: '2px 6px',
+                      fontSize: 10,
+                      borderRadius: 4,
+                      background: '#18181b',
+                      border: '1px solid rgba(255,255,255,0.18)',
+                      color: '#d4d4d8',
+                      cursor: 'pointer',
+                      outline: 'none'
+                    }}
+                    title="Авто тагийн эрч хүч / хэмжээ"
+                  >
+                    <option value="balanced">🌿 Тэнцвэртэй (Natural)</option>
+                    <option value="dramatic">🎭 Жүжиглэлт өндөр (Dramatic)</option>
+                  </select>
+
+                  {detectedTagsCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={handleClearAllTags}
+                      disabled={busy}
+                      style={{
+                        padding: '2px 7px',
+                        fontSize: 10,
+                        borderRadius: 4,
+                        border: '1px solid rgba(239, 68, 68, 0.3)',
+                        background: 'rgba(239, 68, 68, 0.12)',
+                        color: '#f87171',
+                        cursor: 'pointer',
+                        fontWeight: 500
+                      }}
+                      title="Бичвэрт байгаа бүх аудио тагуудыг арилгах"
+                    >
+                      🧹 Цэвэрлэх
+                    </button>
+                  )}
+
+                  {lastUntaggedText !== null && (
+                    <button
+                      type="button"
+                      onClick={handleUndoAutoTag}
+                      disabled={busy}
+                      style={{
+                        padding: '2px 7px',
+                        fontSize: 10,
+                        borderRadius: 4,
+                        border: '1px solid rgba(168, 85, 247, 0.35)',
+                        background: 'rgba(168, 85, 247, 0.18)',
+                        color: '#c084fc',
+                        cursor: 'pointer',
+                        fontWeight: 600
+                      }}
+                      title="Өмнөх эх бичвэр рүү буцаах"
+                    >
+                      ↩️ Буцаах
+                    </button>
+                  )}
+
+                  <div style={{ width: 1, height: 16, background: 'rgba(255,255,255,0.15)', margin: '0 2px' }} />
+
+                  {/* Filter categories */}
+                  <div style={{ display: 'flex', gap: 3 }}>
+                    {[
+                      { id: 'all', label: 'Бүгд' },
+                      { id: 'reaction', label: 'Чимээ / Үйлдэл' },
+                      { id: 'emotion', label: 'Сэтгэл хөдлөл' },
+                      { id: 'tone', label: 'Өнгө аяс' }
+                    ].map((cat) => (
+                      <button
+                        key={cat.id}
+                        type="button"
+                        onClick={() => setTagCategory(cat.id as any)}
+                        style={{
+                          padding: '2px 7px',
+                          fontSize: 10,
+                          borderRadius: 4,
+                          border: 'none',
+                          cursor: 'pointer',
+                          background: tagCategory === cat.id ? '#6366f1' : 'rgba(255,255,255,0.06)',
+                          color: tagCategory === cat.id ? '#fff' : '#aaa',
+                          fontWeight: tagCategory === cat.id ? 650 : 400,
+                          transition: 'all 0.15s ease'
+                        }}
+                      >
+                        {cat.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Tag pills + custom tag input */}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, alignItems: 'center' }}>
+                {filteredTags.map((item) => (
+                  <button
+                    key={item.tag}
+                    type="button"
+                    disabled={busy}
+                    onClick={() => handleInsertTag(item.tag)}
+                    title={`${item.description} - Дарж текстэд оруулах`}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 4,
+                      padding: '3px 8px',
+                      borderRadius: 6,
+                      background: 'rgba(255, 255, 255, 0.05)',
+                      border: '1px solid rgba(255, 255, 255, 0.12)',
+                      color: '#f4f4f5',
+                      fontSize: 11,
+                      fontWeight: 500,
+                      cursor: 'pointer',
+                      transition: 'all 0.15s ease'
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = 'rgba(99, 102, 241, 0.25)';
+                      e.currentTarget.style.borderColor = 'rgba(129, 140, 248, 0.5)';
+                      e.currentTarget.style.transform = 'translateY(-1px)';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)';
+                      e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.12)';
+                      e.currentTarget.style.transform = 'none';
+                    }}
+                  >
+                    <span>{item.icon}</span>
+                    <span style={{ color: '#c7d2fe', fontWeight: 650 }}>{item.tag}</span>
+                    <span style={{ fontSize: 10, color: '#9ca3af' }}>{item.label}</span>
+                  </button>
+                ))}
+
+                {/* Custom tag inline input */}
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (customTagInput.trim()) {
+                      handleInsertTag(customTagInput.trim());
+                      setCustomTagInput('');
+                    }
+                  }}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 3, marginLeft: 2 }}
+                >
+                  <span style={{ fontSize: 11, color: '#818cf8', fontWeight: 700 }}>[</span>
+                  <input
+                    type="text"
+                    value={customTagInput}
+                    onChange={(e) => setCustomTagInput(e.target.value)}
+                    placeholder="өөр таг... (ж: tired)"
+                    style={{
+                      width: 135,
+                      padding: '3px 6px',
+                      fontSize: 10,
+                      borderRadius: 4,
+                      background: '#18181b',
+                      border: '1px solid rgba(255,255,255,0.18)',
+                      color: '#fff',
+                      outline: 'none'
+                    }}
+                  />
+                  <span style={{ fontSize: 11, color: '#818cf8', fontWeight: 700 }}>]</span>
+                  <button
+                    type="submit"
+                    disabled={!customTagInput.trim() || busy}
+                    style={{
+                      padding: '3px 8px',
+                      fontSize: 10,
+                      borderRadius: 4,
+                      background: customTagInput.trim() ? '#4f46e5' : 'rgba(255,255,255,0.06)',
+                      color: '#fff',
+                      border: 'none',
+                      cursor: customTagInput.trim() ? 'pointer' : 'default',
+                      fontWeight: 600
+                    }}
+                    title="Бичсэн тагийг текстэд нэмэх"
+                  >
+                    + Нэмэх
+                  </button>
+                </form>
+              </div>
+
+              {/* Auto-Tag Feedback notice banner */}
+              {autoTagNotice && (
+                <div
+                  style={{
+                    padding: '7px 12px',
+                    borderRadius: 6,
+                    background: autoTagNotice.startsWith('✨')
+                      ? 'rgba(245, 158, 11, 0.16)'
+                      : autoTagNotice.startsWith('🧹')
+                      ? 'rgba(239, 68, 68, 0.16)'
+                      : 'rgba(99, 102, 241, 0.16)',
+                    border: `1px solid ${
+                      autoTagNotice.startsWith('✨')
+                        ? 'rgba(245, 158, 11, 0.4)'
+                        : autoTagNotice.startsWith('🧹')
+                        ? 'rgba(239, 68, 68, 0.4)'
+                        : 'rgba(99, 102, 241, 0.4)'
+                    }`,
+                    color: autoTagNotice.startsWith('✨') ? '#fde68a' : '#e0e7ff',
+                    fontSize: 11,
+                    fontWeight: 500,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 8
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span>{autoTagNotice}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setAutoTagNotice(null)}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: '#a1a1aa',
+                      cursor: 'pointer',
+                      fontSize: 13,
+                      padding: 0,
+                      lineHeight: 1
+                    }}
+                    title="Хаах"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+
+              {/* Instructional hint */}
+              <div style={{ fontSize: 10, color: '#9ca3af', lineHeight: 1.4 }}>
+                💡 <strong>Хэрэглэх:</strong> <strong>✨ Авто Таг (Auto Tag)</strong> товч дээр дарж бүх текст эсвэл сонгосон хэсэгтээ сэтгэл хөдлөл, үйлдэл, харилцан ярианы тагуудыг нэг дор автоматаар оруулаарай. Мөн таг дээр дарж курсор байгаа байрлалд гараар оруулж болно.
+              </div>
+            </div>
+
             {/* Textarea */}
             <textarea
+              ref={textareaRef}
               rows={7}
               value={scriptText}
               disabled={busy}
               onChange={(e) => setScriptText(e.target.value)}
               placeholder={
                 studioMode === 'voice_only'
-                  ? `Монгол тайлбар / зохиолын текстээ энд шууд Paste хийж оруулна уу... Таны ${metrics.activeKeyCount || 1} API түлхүүрээр зэрэгцүүлэн уншиж, цэвэр дуу хоолой үүсгэнэ.`
-                  : 'Монгол recap тайлбар зохиолоо энд шууд Paste хийж оруулна уу... Multi-Key Pool систем нь текстийг автоматаар өгүүлбэрийн төгсгөлөөр таслан таны бүртгэлтэй түлхүүрүүд рүү зэрэгцүүлэн илгээнэ.'
+                  ? `Монгол тайлбар / зохиолын текстээ энд шууд Paste хийж оруулна уу... Дээрх [whispers], [laughs], [excited] зэрэг аудио тагуудыг ашиглан дүрүүдийн сэтгэл хөдлөлийг амьд жүжиглүүлж болно.`
+                  : 'Монгол recap тайлбар зохиолоо энд шууд Paste хийж оруулна уу... Аудио тагуудыг өгүүлбэр бүрийн өмнө [whispers], [excited] хэлбэрээр оруулан жүжиглэлттэй recap үүсгэх боломжтой.'
               }
               style={{
                 width: '100%',
@@ -1247,7 +1709,7 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
             {metrics.chunks.length > 0 && (
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', marginTop: 2, fontSize: 11, color: '#a1a1aa' }}>
                 <span style={{ fontWeight: 600, color: '#e4e4e7' }}>
-                  ✂️ Түлхүүрүүд рүү зэрэгцүүлэн илгээх {metrics.chunks.length} хэсэг (тус бүр ≤ 2,200 тэмдэгт):
+                  ✂️ Түлхүүрүүд рүү зэрэгцүүлэн илгээх {metrics.chunks.length} хэсэг (тус бүр ≤ {CHUNK_SIZE.toLocaleString()} тэмдэгт):
                 </span>
                 {metrics.chunks.map((ch, idx) => (
                   <span
@@ -1339,13 +1801,19 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
                   fontSize: 12
                 }}
               >
-                <option value="eleven_v3">🌟 Eleven v3 (ҮНДСЭН · 70+ хэл, амьд сэтгэл хөдлөл, жүжиглэлт)</option>
+                <option value="eleven_v4">🌟 Eleven v4 (СҮҮЛИЙН ҮЕИЙН · 90+ хэл, дээд зэргийн жүжиглэлт, аудио таг)</option>
+                <option value="eleven_v4_turbo">⚡ Eleven v4 Turbo (Хэт хурдан 100ms · v4 жүжиглэлт)</option>
+                <option value="eleven_v3">✨ Eleven v3 (Санал болгох · 70+ хэл, амьд сэтгэл хөдлөл, жүжиглэлт)</option>
                 <option value="eleven_multilingual_v2">🎙️ Multilingual v2 (Баталгаат хувилбар)</option>
                 <option value="eleven_flash_v2_5">Flash v2.5 (Хурдан хувилбар)</option>
                 <option value="eleven_turbo_v2_5">Turbo v2.5 (Хямд тариф)</option>
               </select>
               <span style={{ fontSize: 10, color: '#71717a' }}>
-                {modelId === 'eleven_v3'
+                {modelId === 'eleven_v4'
+                  ? '✓ Eleven v4 нь дуу хоолойн дээд зэргийн жүжиглэлттэй, аудио таг ([whispers], [laughs], [sighs] г.м) болон 90+ хэл дэмжинэ.'
+                  : modelId === 'eleven_v4_turbo'
+                  ? '✓ Eleven v4 Turbo нь хамгийн бага хоцролттойгоор (100ms) v4 түвшний яриа үүсгэнэ.'
+                  : modelId === 'eleven_v3'
                   ? '✓ Eleven v3 нь өгүүлбэрийн утгыг шууд мэдэрч жүжиглэлттэй, амьд ярина (Зэрэгцээ Parallel боловсруулалттай).'
                   : modelId === 'eleven_multilingual_v2'
                   ? '✓ Multilingual v2 нь туршигдсан баталгаат чанартай.'

@@ -33,13 +33,30 @@ export interface TextStyle {
   fontSize: number;   // px at project resolution
   color: string;
   bold: boolean;
+  italic?: boolean;
+  underline?: boolean;
   shadow: boolean;
+  shadowColor?: string;
+  shadowBlur?: number;
   background: string; // '' for none
+  backgroundPadding?: number;
+  backgroundRoundness?: number;
   fontFamily?: string;
   fontPath?: string;
   stroke?: boolean;
   strokeColor?: string;
   strokeWidth?: number;
+  letterSpacing?: number;
+  lineSpacing?: number;
+  align?: 'left' | 'center' | 'right' | 'justify';
+  verticalAlign?: 'top' | 'middle' | 'bottom';
+  textCase?: 'uppercase' | 'lowercase' | 'capitalize' | 'none';
+  presetStyleId?: string;
+  effectId?: string;
+  bubbleId?: string;
+  gradientColors?: string[];
+  shadowOffsetX?: number;
+  shadowOffsetY?: number;
 }
 
 export interface FontItem {
@@ -329,6 +346,7 @@ declare global {
       setupRecapDownloader(): Promise<{ok:boolean;error?:string}>;
       cancelFastRecap(): Promise<boolean>;
       runFastRecap(spec: FastRecapSpec): Promise<FastRecapResult>;
+      startDubPipeline(spec: Record<string, unknown>): Promise<FastRecapResult>;
       onRecapProgress(cb:(p:Record<string,unknown>)=>void):()=>void;
       readSettings(): Promise<AppSettings>;
       updateSettings(patch: Record<string, unknown>): Promise<AppSettings>;
@@ -340,6 +358,9 @@ declare global {
         binary: string | null;
         models: { id: string; label: string; mb: number; note: string; installed: boolean }[];
       }>;
+      getGroqKeys(): Promise<string[]>;
+      saveGroqKeys(keys: string | string[]): Promise<{ ok: boolean; count: number; keys: string[] }>;
+      openExternal?(url: string): Promise<void>;
       downloadWhisperModel(model: string): Promise<string>;
       cancelCaptionAlignment(): Promise<boolean>;
       onWhisperProgress(cb: (p: { model: string; pct: number }) => void): () => void;
@@ -401,6 +422,7 @@ declare global {
       thumbnails(filePath: string, duration: number, count?: number): Promise<string[]>;
       waveform(filePath: string): Promise<WaveformData>;
       clipThumbnails(filePath: string, timestamps: number[]): Promise<{ ok: boolean; paths: string[]; error?: string }>;
+      getCachedThumbnails(filePath: string): Promise<Array<{ key: number; path: string }>>;
       extractFreezeFrame(spec: { videoPath: string; timestamp: number }): Promise<{ ok: boolean; imagePath?: string; error?: string }>;
       sceneDetect(filePath: string, threshold?: number): Promise<{ ok: boolean; cuts: number[]; error?: string }>;
       saveExportDialog(defaultName?: string): Promise<string | null>;
@@ -439,6 +461,16 @@ declare global {
           end: number;
           duration: number;
         }>;
+        error?: string;
+      }>;
+      renderTimelineSpeech(spec: {
+        clips?: any[];
+        audio?: any[];
+        duration?: number;
+      }): Promise<{ ok: boolean; audioPath?: string; duration?: number; isTemp?: boolean; error?: string }>;
+      aiFixMongolianCaptions(lines: string[]): Promise<{
+        ok: boolean;
+        corrected?: string[];
         error?: string;
       }>;
       onVoiceAlignProgress(cb: (info: any) => void): () => void;
@@ -491,6 +523,7 @@ export interface FastRecapResult {
   status?:string;
   path?:string;
   projectPath?:string;
+  projectId?:string;
   transcriptPath?:string;
   srtPath?:string;
   reportPath?:string;
@@ -498,6 +531,8 @@ export interface FastRecapResult {
   reservedCharacters?:number;
   cached?:number;
   targetMet?:boolean;
+  stats?:Record<string,unknown>;
+  chunkCount?:number;
   issues?:{id:number;start:number;overflow:number;text:string}[];
 }
 

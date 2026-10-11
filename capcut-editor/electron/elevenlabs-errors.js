@@ -15,12 +15,15 @@ function responseError(status, body, retryAfter) {
 function classifyError(error) {
   const code = String(error.code || '').toLowerCase();
   const message = String(error.message || error).toLowerCase();
-  // HTTP 401/402 alone does NOT mean a balance is exhausted.
-  if (code === 'quota_exceeded' || (!code && /quota_exceeded|insufficient quota|quota exceeded/.test(message))) return 'quota';
+  if (
+    error.status === 402 ||
+    code === 'quota_exceeded' ||
+    /quota_exceeded|insufficient quota|quota exceeded|not enough credits|insufficient_credits|exceeded.*quota/.test(code) ||
+    /quota_exceeded|insufficient quota|quota exceeded|not enough credits|insufficient_credits|exceeded.*quota|credit.*limit/.test(message)
+  ) return 'quota';
   if (error.status === 429 || /rate_limit|concurrent_limit|too_many_concurrent/.test(code)) return 'rate';
-  // Authorization, voice restrictions and abuse blocks need user action, not
-  // automatic rotation through accounts or an invented "credits exhausted" error.
-  if ([400, 401, 402, 403, 404, 422].includes(error.status)) return 'terminal';
+  if (code === 'detected_unusual_activity' || /unusual_activity|blocked|banned/.test(message)) return 'terminal';
+  if ([401, 403, 404, 422].includes(error.status)) return 'terminal';
   return 'transient';
 }
 

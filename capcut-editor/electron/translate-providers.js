@@ -1,5 +1,4 @@
 'use strict';
-const Anthropic = require('@anthropic-ai/sdk');
 
 /**
  * Translation back-ends.
@@ -35,35 +34,38 @@ const claude = {
   label: 'Claude',
   keyField: 'anthropicApiKey',
   needsKey: true,
-  defaultModel: 'claude-opus-5',
-  suggestedModels: ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5'],
+  defaultModel: 'claude-3-7-sonnet-20250219',
+  suggestedModels: ['claude-3-7-sonnet-20250219', 'claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022'],
   note: 'Best quality for Mongolian',
 
   async complete({ apiKey, model, system, user, schema, signal }) {
-    const client = new Anthropic({ apiKey });
-    let res;
-    try {
-      res = await client.messages.create({
-        model,
-        max_tokens: 16000,
-        // The system prompt is identical across batches, so it is worth caching.
-        system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
-        thinking: { type: 'adaptive' },
-        // Thinking bills at the output rate; translation rarely needs depth.
-        output_config: { effort: 'low', format: { type: 'json_schema', schema } },
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      signal,
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: model || 'claude-3-7-sonnet-20250219',
+        max_tokens: 8192,
+        system: system + '\nYou MUST reply with valid JSON matching: {"translations":[{"id":number,"text":string}]}',
         messages: [{ role: 'user', content: user }]
-      }, { signal });
-    } catch (err) {
-      if (err instanceof Anthropic.RateLimitError) {
-        throw Object.assign(new Error('Claude rate limit reached.'), { retryable: true });
-      }
-      if (err instanceof Anthropic.AuthenticationError) throw new Error('Claude API key was rejected.');
-      if (err instanceof Anthropic.APIConnectionError) throw new Error('Could not reach the Claude API.');
-      throw new Error(`Claude request failed: ${err.message}`);
+      })
+    });
+    if (res.status === 401) throw new Error('Claude API key was rejected.');
+    if (res.status === 429 || res.status === 529) {
+      throw Object.assign(new Error('Claude rate limit reached.'), { retryable: true });
     }
-    if (res.stop_reason === 'refusal') throw new Error('Claude declined the translation request.');
-    const block = res.content.find((b) => b.type === 'text');
-    if (!block) throw new Error('Claude returned no text.');
+    if (!res.ok) {
+      let detail = '';
+      try { detail = (await res.json())?.error?.message || ''; } catch {}
+      throw new Error(`Claude error ${res.status}${detail ? `: ${detail}` : ''}`);
+    }
+    const data = await res.json();
+    const block = data?.content?.find((b) => b.type === 'text');
+    if (!block || !block.text) throw new Error('Claude returned no text.');
     return block.text;
   }
 };
@@ -228,6 +230,69 @@ const ollama = {
   }
 };
 
-const PROVIDERS = { claude, gemini, openai, ollama };
+const groq = {
+  id: 'groq',
+  label: 'Groq Cloud',
+  keyField: 'groqApiKey',
+  needsKey: true,
+  defaultModel: 'openai/gpt-oss-120b',
+  suggestedModels: ['openai/gpt-oss-120b', 'qwen/qwen3.8-27b', 'openai/gpt-oss-20b'],
+  note: 'Fastest & free tier',
+
+  async listModels(apiKey) {
+    if (!apiKey) return [];
+    try {
+      const res = await fetch('https://api.groq.com/openai/v1/models', {
+        headers: { authorization: `Bearer ${apiKey}` }
+      });
+      if (!res.ok) return [];
+      const data = await res.json();
+      return (data.data || [])
+        .map((m) => m.id)
+        .filter((n) => !/whisper|guard|allam|orpheus/i.test(n));
+    } catch {
+      return [];
+    }
+  },
+
+  async complete({ apiKey, model, system, user, schema, signal }) {
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      signal,
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: model || 'openai/gpt-oss-120b',
+        temperature: 0.3,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content: `${system}\nYou MUST return a JSON object with a "translations" array, where each item has "id" and "text":\n{"translations":[{"id":1,"text":"..."}]}`
+          },
+          { role: 'user', content: user }
+        ]
+      })
+    });
+    if (res.status === 401) throw new Error('Groq API key was rejected.');
+    if (res.status === 429 || res.status === 503) {
+      throw Object.assign(new Error('Groq rate limit reached.'), { retryable: true });
+    }
+    if (!res.ok) {
+      let detail = '';
+      try { detail = (await res.json())?.error?.message || ''; } catch { /* not JSON */ }
+      throw new Error(`Groq error ${res.status}${detail ? `: ${detail}` : ''}`);
+    }
+    const data = await res.json();
+    const text = data?.choices?.[0]?.message?.content ?? '';
+    if (!text) throw new Error('Groq returned no text.');
+    return text;
+  }
+};
+
+const PROVIDERS = { claude, gemini, openai, groq, ollama };
 
 module.exports = { PROVIDERS };
+

@@ -7,6 +7,8 @@ function load(transcribe, installed = true) {
   'node:fs': { existsSync: () => true },
   './ffmpeg': { probe: async () => ({ duration: 10, hasAudio: true }), detectSpeechSegments: () => { throw new Error('No silence fallback allowed'); } },
   './srt-parser': {},
+  './caption-timing': require('../electron/caption-timing'),
+  './mongolian-text-fixer': { polishMongolianCaptionsWithAI: async () => assert.fail('Audio-only captions must not be rewritten without audio') },
   './whisper': { status: () => ({ available: true, models: [{ id: 'base', installed }] }), transcribe }
  }[name] || require(name)) };
  vm.runInNewContext(fs.readFileSync(require.resolve('../electron/audio-script-align'), 'utf8'), context);

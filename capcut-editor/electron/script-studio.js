@@ -84,7 +84,7 @@ async function buildScriptRecap(spec, progress) {
   const {
     scriptText,
     voiceId = 'TX3LPaxmHKxFdv7VOQHJ',
-    modelId = 'eleven_v3',
+    modelId = 'eleven_v4',
     stability = 0.5,
     similarity = 0.75,
     speed = 1.0,
@@ -133,8 +133,8 @@ async function buildScriptRecap(spec, progress) {
     }
   }
 
-  // 1. Synthesize audio via ElevenLabs Multi-Key Dispatcher in safe chunks (<= 2200 chars per API call)
-  const scriptChunks = splitScriptIntoChunks(cleanScript, 2200);
+  // 1. Synthesize audio via ElevenLabs Multi-Key Dispatcher in safe chunks (<= 1000 chars per API call)
+  const scriptChunks = splitScriptIntoChunks(cleanScript, 1000);
   const audioDir = path.join(app.getPath('userData'), 'script-studio-audio');
   fs.mkdirSync(audioDir, { recursive: true });
   const audioFile = path.join(audioDir, `voice_master_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.mp3`);

@@ -47,10 +47,69 @@ function validateProject(data) {
         return item;
       });
     }
-    if (c.style) {
-      const s = c.style;
-      if (![s.text,s.color,s.background].every(x => typeof x === 'string') || !finite(s.fontSize) || s.fontSize < 1 || s.fontSize > 2000) fail();
-      result.style = {text:s.text,color:s.color,background:s.background,fontSize:s.fontSize,bold:!!s.bold,shadow:!!s.shadow};
+    if (c.style || c.kind === 'text') {
+      const s = c.style || {};
+      const text = typeof s.text === 'string' ? s.text : (typeof c.name === 'string' ? c.name : '');
+      const color = typeof s.color === 'string' ? s.color : '#FFFFFF';
+      const background = typeof s.background === 'string' ? s.background : '';
+      const fontSize = (finite(s.fontSize) && s.fontSize >= 1 && s.fontSize <= 2000) ? s.fontSize : 36;
+      const style = {
+        text,
+        color,
+        background,
+        fontSize,
+        bold: !!s.bold,
+        shadow: !!s.shadow
+      };
+
+      // Stroke / Border / Outline
+      if (s.stroke !== undefined) style.stroke = !!s.stroke;
+      if (typeof s.strokeColor === 'string') style.strokeColor = s.strokeColor;
+      if (finite(s.strokeWidth)) style.strokeWidth = s.strokeWidth;
+
+      // Shadow & Glow details
+      if (typeof s.shadowColor === 'string') style.shadowColor = s.shadowColor;
+      if (finite(s.shadowBlur)) style.shadowBlur = s.shadowBlur;
+      if (finite(s.shadowOffsetX)) style.shadowOffsetX = s.shadowOffsetX;
+      if (finite(s.shadowOffsetY)) style.shadowOffsetY = s.shadowOffsetY;
+
+      // Fonts & Typography
+      if (typeof s.fontFamily === 'string') style.fontFamily = s.fontFamily;
+      if (typeof s.fontPath === 'string') style.fontPath = s.fontPath;
+      if (s.italic !== undefined) style.italic = !!s.italic;
+      if (s.underline !== undefined) style.underline = !!s.underline;
+      if (finite(s.letterSpacing)) style.letterSpacing = s.letterSpacing;
+      if (finite(s.lineSpacing)) style.lineSpacing = s.lineSpacing;
+      if (typeof s.align === 'string') style.align = s.align;
+      if (typeof s.verticalAlign === 'string') style.verticalAlign = s.verticalAlign;
+      if (typeof s.textCase === 'string') style.textCase = s.textCase;
+
+      // Effects, Presets, Bubbles
+      if (typeof s.presetStyleId === 'string') style.presetStyleId = s.presetStyleId;
+      if (typeof s.effectId === 'string') style.effectId = s.effectId;
+      if (typeof s.bubbleId === 'string') style.bubbleId = s.bubbleId;
+
+      // Background details
+      if (finite(s.backgroundPadding)) style.backgroundPadding = s.backgroundPadding;
+      if (finite(s.backgroundRoundness)) style.backgroundRoundness = s.backgroundRoundness;
+
+      // Gradient colors
+      if (Array.isArray(s.gradientColors)) {
+        style.gradientColors = s.gradientColors.filter(gc => typeof gc === 'string');
+      }
+
+      // Preserve all other custom style keys safely
+      for (const k of Object.keys(s)) {
+        if (style[k] === undefined && s[k] !== undefined) {
+          if (typeof s[k] === 'string' || typeof s[k] === 'number' || typeof s[k] === 'boolean') {
+            style[k] = s[k];
+          } else if (Array.isArray(s[k])) {
+            style[k] = s[k].slice(0, 50);
+          }
+        }
+      }
+
+      result.style = style;
     }
     if (c.kind !== 'av' && !result.style) fail();
     return result;
@@ -261,6 +320,18 @@ function registerProjectHandlers({ipcMain,dialog,app,getWindow}) {
     console.log('[ProjectStore] Read raw project clips:', raw.clips?.length);
     const data = validateProject(raw);
     console.log('[ProjectStore] Validated project clips:', data.clips?.length);
+    try {
+      const { healFreezeMedia } = require('./freeze-heal');
+      const freezeDir = path.join(app.getPath('userData'), 'freeze-frames');
+      const res = await healFreezeMedia(data, freezeDir, (msg) => console.log(msg));
+      if (res.fixed > 0) {
+        const backup = `${p}.before-freeze-heal.bak`;
+        if (!fs.existsSync(backup)) fs.copyFileSync(p, backup);
+        atomicWrite(p, data);
+      }
+    } catch (err) {
+      console.warn('[ProjectStore] Freeze heal failed:', err.message);
+    }
     atomicWrite(activePath(), { id });
     return { ok: true, id, data };
   }));

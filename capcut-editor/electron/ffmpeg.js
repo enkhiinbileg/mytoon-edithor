@@ -304,6 +304,31 @@ async function framesAtTimestamps(filePath, timestamps) {
   return results;
 }
 
+/**
+ * Rapidly list already cached thumbnail frames from disk for a media file.
+ */
+async function getCachedFrames(filePath) {
+  if (!filePath) return [];
+  try {
+    const id = crypto.createHash('sha1').update(filePath).digest('hex').slice(0, 16);
+    const dir = path.join(THUMB_DIR, id);
+    if (!fs.existsSync(dir)) return [];
+    const files = await fs.promises.readdir(dir);
+    const list = [];
+    for (const f of files) {
+      if (f.startsWith('f_') && f.endsWith('.jpg')) {
+        const key = parseInt(f.slice(2, -4), 10);
+        if (!isNaN(key)) {
+          list.push({ key, path: path.join(dir, f) });
+        }
+      }
+    }
+    return list;
+  } catch {
+    return [];
+  }
+}
+
 /** Persist a rasterised overlay (data: URL from the renderer) to a temp PNG. */
 function writeOverlayPng(dataUrl, index) {
   const b64 = dataUrl.replace(/^data:image\/png;base64,/, '');
@@ -506,7 +531,7 @@ async function exportTimeline(spec, onProgress) {
   const backend = await getExportBackend(spec.codec || 'hevc');
   const FFMPEG = backend.binary;
   const {clips = [], audio = [], overlays = [], width, height, fps, outPath} = spec;
-  const isMp3 = spec.format === 'mp3' || String(outPath).toLowerCase().endsWith('.mp3');
+  const isAudioOnly = ['mp3', 'wav', 'aac'].includes(spec.format) || /\.(mp3|wav|aac)$/i.test(String(outPath));
   const duration = (typeof spec.duration === 'number' && spec.duration > 0)
     ? spec.duration
     : Math.max(0, ...clips.map(c=>c.start+c.outPoint-c.inPoint), ...audio.map(c=>c.start+c.outPoint-c.inPoint), ...overlays.map(o=>o.end));
@@ -515,7 +540,7 @@ async function exportTimeline(spec, onProgress) {
   const startTime = Date.now();
   let lastPct = -1;
 
-  if (isMp3) {
+  if (isAudioOnly) {
     const args = ['-y'];
     const graph = [];
     const tempFiles = [];
@@ -535,7 +560,11 @@ async function exportTimeline(spec, onProgress) {
       if (c.hasAudio && c.kind !== 'image' && (c.volume ?? 1) > 0.001) {
         const d = c.outPoint - c.inPoint;
         if (d > 0) {
-          args.push('-ss', String(c.inPoint), '-t', String(d), '-i', c.src);
+          if (c.inPoint > 0) {
+            args.push('-ss', String(c.inPoint), '-t', String(d), '-i', c.src);
+          } else {
+            args.push('-t', String(d), '-i', c.src);
+          }
           const input = index++;
           const delay = Math.round(c.start * 1000);
           graph.push(
@@ -552,7 +581,11 @@ async function exportTimeline(spec, onProgress) {
     mergedAudio.forEach((a, k) => {
       const d = a.outPoint - a.inPoint;
       if (d > 0) {
-        args.push('-ss', String(a.inPoint), '-t', String(d), '-i', a.src);
+        if (a.inPoint > 0) {
+          args.push('-ss', String(a.inPoint), '-t', String(d), '-i', a.src);
+        } else {
+          args.push('-t', String(d), '-i', a.src);
+        }
         const input = index++;
         const delay = Math.round(a.start * 1000);
         graph.push(
@@ -563,8 +596,8 @@ async function exportTimeline(spec, onProgress) {
       }
     });
 
-    const isWav = spec.format === 'wav';
-    const isAac = spec.format === 'aac';
+    const isWav = spec.format === 'wav' || /\.wav$/i.test(String(outPath));
+    const isAac = spec.format === 'aac' || /\.aac$/i.test(String(outPath));
     const bitrate = spec.audioBitrate || (spec.quality === 'high' ? '320k' : spec.quality === 'draft' ? '128k' : '192k');
     graph.push(sounds.join('') + 'amix=inputs=' + sounds.length + ':normalize=0:duration=first,atrim=duration=' + fx(duration) + '[aout]');
 
@@ -576,6 +609,8 @@ async function exportTimeline(spec, onProgress) {
     } else {
       args.push('-c:a', 'libmp3lame', '-b:a', bitrate);
     }
+    if (spec.audioSampleRate) args.push('-ar', String(spec.audioSampleRate));
+    if (spec.audioChannels) args.push('-ac', String(spec.audioChannels));
     args.push('-progress', 'pipe:1', '-nostats', outPath);
 
     return new Promise((resolve, reject) => {
@@ -730,7 +765,7 @@ async function exportTimeline(spec, onProgress) {
         vCurrent = '[clip0]';
       }
 
-      if (c.hasAudio && c.kind !== 'image') {
+      if (c.hasAudio && c.kind !== 'image' && (c.volume ?? 1) > 0.0001) {
         graph.push(`[${input}:a]atrim=duration=${d},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume=${fx(c.volume ?? 1)}[sound0]`);
         sounds.push('[sound0]');
       }
@@ -771,7 +806,7 @@ async function exportTimeline(spec, onProgress) {
         if(c.effectFf)filters.push(c.effectFf);
         filters.push('trim=duration='+d,'setpts=PTS-STARTPTS','format=yuv420p');
         graph.push('['+input+':v]'+filters.join(',')+'[clip'+i+']');
-        if(c.hasAudio && c.kind!=='image') {
+        if(c.hasAudio && c.kind!=='image' && (c.volume ?? 1) > 0.0001) {
           const delay=Math.round(c.start*1000);
           graph.push('['+input+':a]atrim=duration='+d+',asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,volume='+fx(c.volume??1)+',adelay='+delay+':all=1[sound'+i+']');
           sounds.push('[sound'+i+']');
@@ -822,7 +857,7 @@ async function exportTimeline(spec, onProgress) {
       }
     }
 
-    if (!copySequenceVideo && canSequenceOverlays(overlays, width, height)) {
+    if (!copySequenceVideo && canSequenceOverlays(overlays, width, height, 1)) {
       captionDir = fs.mkdtempSync(path.join(OVERLAY_DIR, 'recap-captions-'));
       const manifest = prepareOverlaySequence({overlays,width,height,fps,duration,workDir:captionDir});
       args.push('-f','concat','-safe','0','-i',manifest);
@@ -1049,7 +1084,14 @@ function detectSceneCuts(filePath, threshold = 0.35, options = {}) {
   });
 }
 
-const FREEZE_DIR = path.join(os.tmpdir(), 'capcut-editor-freeze');
+// Persistent location: %TEMP% gets cleaned by Windows, which turned freeze clips black.
+const FREEZE_DIR = (() => {
+  try {
+    const { app } = require('electron');
+    if (app?.getPath) return path.join(app.getPath('userData'), 'freeze-frames');
+  } catch {}
+  return path.join(os.tmpdir(), 'capcut-editor-freeze');
+})();
 fs.mkdirSync(FREEZE_DIR, { recursive: true });
 
 /** Extract a single high-quality frame for CapCut Freeze feature */
@@ -1200,6 +1242,6 @@ async function concatAudioFiles(files, outPath) {
   return outPath;
 }
 
-module.exports = { run, probe, thumbnails, framesAtTimestamps, extractWaveform, exportTimeline, cancelExport, detectHardwareEncoders, getBestVideoEncoder, detectSpeechSegments, detectSceneCuts, extractFreezeFrame, extractFreezeFrameBatch, concatAudioFiles, FFMPEG, FFPROBE };
+module.exports = { run, probe, thumbnails, framesAtTimestamps, getCachedFrames, extractWaveform, exportTimeline, cancelExport, detectHardwareEncoders, getBestVideoEncoder, detectSpeechSegments, detectSceneCuts, extractFreezeFrame, extractFreezeFrameBatch, concatAudioFiles, FFMPEG, FFPROBE };
 
 

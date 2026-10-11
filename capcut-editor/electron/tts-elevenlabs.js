@@ -15,6 +15,8 @@ const API = 'https://api.elevenlabs.io/v1';
  * the single biggest lever on the cost of a dub.
  */
 const MODELS = [
+  { id: 'eleven_v4', label: 'Eleven v4 (Сүүлийн үеийн · 90+ хэл, өндөр жүжиглэлт, аудио таг)', credits: 1, note: 'Шинэ v4 модель' },
+  { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo (Хэт хурдан 100ms · 90+ хэл)', credits: 0.5, note: 'Хурдан v4 модель' },
   { id: 'eleven_v3', label: 'Eleven v3 (Санал болгох · 70+ хэл, амьд сэтгэл хөдлөл)', credits: 1, note: 'Шинэ v3 модель' },
   { id: 'eleven_multilingual_v2', label: 'Multilingual v2', credits: 1, note: 'Туршигдсан баталгаат' },
   { id: 'eleven_flash_v2_5', label: 'Flash v2.5 (Хэт хурдан 75ms)', credits: 0.5, note: 'Хамгийн бага хоцролт' },
@@ -25,8 +27,13 @@ const MODELS = [
  * v3 takes a different settings shape than the v2-era models (its stability is
  * a three-way creative/natural/robust choice, not a free slider), so optional
  * tuning fields are omitted for it rather than sent and rejected.
+ *
+ * v4 supports stability (0-1) and similarity_boost (0-1), but does not support
+ * speed or style sliders. Inline audio tags (e.g. [whispers], [laughs]) and
+ * IPA pronunciation are supported instead.
  */
 const isV3 = (modelId) => String(modelId).startsWith('eleven_v3');
+const isV4 = (modelId) => String(modelId).startsWith('eleven_v4');
 
 async function request(pathname, apiKey, init = {}) {
   const res = await fetch(API + pathname, {
@@ -125,7 +132,7 @@ async function speak({
   apiKey,
   voiceId,
   text,
-  modelId = 'eleven_multilingual_v2',
+  modelId = 'eleven_v4',
   previousText = '',
   nextText = '',
   stability = 0.5,
@@ -134,6 +141,30 @@ async function speak({
   signal
 }) {
   const targetVoiceId = voiceId || DEFAULT_VOICE_ID;
+  const requestBody = isV3(modelId)
+    ? { text, model_id: modelId }
+    : isV4(modelId)
+    ? {
+        text,
+        model_id: modelId,
+        previous_text: previousText || undefined,
+        next_text: nextText || undefined,
+        voice_settings: {
+          stability: Number(stability) || 0.5,
+          similarity_boost: Number(similarity) || 0.75
+        }
+      }
+    : {
+        text,
+        model_id: modelId,
+        previous_text: previousText || undefined,
+        next_text: nextText || undefined,
+        voice_settings: {
+          stability: Number(stability) || 0.5,
+          similarity_boost: Number(similarity) || 0.75
+        }
+      };
+
   const res = await request(
     `/text-to-speech/${targetVoiceId}?output_format=mp3_44100_128`,
     apiKey,
@@ -141,17 +172,7 @@ async function speak({
       signal,
       method: 'POST',
       headers: { 'content-type': 'application/json', accept: 'audio/mpeg' },
-      body: JSON.stringify(
-        isV3(modelId)
-          ? { text, model_id: modelId }
-          : {
-              text,
-              model_id: modelId,
-              previous_text: previousText || undefined,
-              next_text: nextText || undefined,
-              voice_settings: { stability, similarity_boost: similarity }
-            }
-      )
+      body: JSON.stringify(requestBody)
     }
   );
 
@@ -168,7 +189,7 @@ async function speakWithTimestamps({
   apiKey,
   voiceId,
   text,
-  modelId = 'eleven_multilingual_v2',
+  modelId = 'eleven_v4',
   stability = 0.5,
   similarity = 0.75,
   speed = 1.0,
@@ -178,6 +199,15 @@ async function speakWithTimestamps({
   const targetVoiceId = voiceId || DEFAULT_VOICE_ID;
   const body = isV3(modelId)
     ? { text, model_id: modelId }
+    : isV4(modelId)
+    ? {
+        text,
+        model_id: modelId,
+        voice_settings: {
+          stability: Number(stability) || 0.5,
+          similarity_boost: Number(similarity) || 0.75
+        }
+      }
     : {
         text,
         model_id: modelId,
@@ -219,19 +249,21 @@ async function speakWithTimestamps({
     .filter((s) => s.length > 0);
 
   const sentences = [];
+  const hasBracketsInAlignment = chars.includes('[');
   let charIdx = 0;
 
   for (let sIdx = 0; sIdx < rawSentences.length; sIdx++) {
     const sText = rawSentences[sIdx];
+    const matchText = hasBracketsInAlignment ? sText : sText.replace(/\[[^\]]+\]/g, '').trim();
     const sStartChar = charIdx;
-    charIdx += sText.length;
+    charIdx += Math.max(1, matchText.length);
     while (charIdx < chars.length && /\s/.test(chars[charIdx])) {
       charIdx++;
     }
     const sEndChar = Math.min(chars.length - 1, Math.max(sStartChar, charIdx - 1));
 
     const startTime = startTimes[sStartChar] ?? (sIdx === 0 ? 0 : sentences[sIdx - 1]?.end ?? 0);
-    const endTime = endTimes[sEndChar] ?? (startTime + Math.max(1.5, sText.length * 0.08));
+    const endTime = endTimes[sEndChar] ?? (startTime + Math.max(1.5, (matchText.length || sText.length) * 0.08));
 
     sentences.push({
       id: sIdx,

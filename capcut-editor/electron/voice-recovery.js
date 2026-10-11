@@ -3,34 +3,62 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { createHash, randomUUID } = require('node:crypto');
 
-// Legacy parts have no job ID. Keep the latest time cluster only, and refuse
-// ambiguous duplicate indices instead of filling holes from another attempt.
+function comparePaths(a, b) {
+  const pA = a.path || [0];
+  const pB = b.path || [0];
+  const len = Math.min(pA.length, pB.length);
+  for (let i = 0; i < len; i++) {
+    if (pA[i] !== pB[i]) return pA[i] - pB[i];
+  }
+  return pA.length - pB.length;
+}
+
+// Keep the latest time cluster only, supporting both simple pool_part_N_...
+// and hierarchical sub-chunks like pool_part_N_M_...
 async function scanLatestParts(dir) {
   const names = await fs.readdir(dir).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
   const files = [];
   for (const name of names) {
-    const match = /^pool_part_(\d+)_(\d{13})_([a-z0-9]+)\.mp3$/i.exec(name);
+    const match = /^pool_part_(.+)_(\d{13})_([a-z0-9]+)\.mp3$/i.exec(name);
     if (!match) continue;
     const stat = await fs.stat(path.join(dir, name));
     if (!stat.isFile()) continue;
-    files.push({ name, index: Number(match[1]), requestedAt: Number(match[2]), size: stat.size, modifiedAt: stat.mtimeMs });
+    const pathParts = match[1].split('_').map(Number);
+    files.push({
+      name,
+      path: pathParts,
+      major: pathParts[0],
+      indexLabel: pathParts.map((n, i) => i === 0 ? n + 1 : n).join('.'),
+      requestedAt: Number(match[2]),
+      size: stat.size,
+      modifiedAt: stat.mtimeMs
+    });
   }
-  files.sort((a, b) => a.requestedAt - b.requestedAt || a.index - b.index);
+  files.sort((a, b) => a.requestedAt - b.requestedAt);
   let start = 0;
   for (let i = 1; i < files.length; i++) {
     if (files[i].requestedAt - files[i - 1].requestedAt > 30 * 60 * 1000) start = i;
   }
-  const parts = files.slice(start).sort((a, b) => a.index - b.index || a.requestedAt - b.requestedAt);
-  const indices = new Set(parts.map(p => p.index));
+  const parts = files.slice(start).sort(comparePaths);
+  const majorIndices = new Set(parts.map(p => p.major));
   const missing = [];
-  const maxIndex = parts.length ? Math.max(...indices) : -1;
-  if (maxIndex > 100000) throw new Error('Хэсгийн дугаар хэт том байна.');
-  for (let i = 0; i <= maxIndex; i++) if (!indices.has(i)) missing.push(i + 1);
-  const ambiguous = indices.size !== parts.length;
-  const token = createHash('sha256').update(JSON.stringify(parts)).digest('hex');
-  return { token, parts, missing, ambiguous, inferred: true,
+  const maxMajor = parts.length ? Math.max(...majorIndices) : -1;
+  if (maxMajor > 100000) throw new Error('Хэсгийн дугаар хэт том байна.');
+  for (let i = 0; i <= maxMajor; i++) {
+    if (!majorIndices.has(i)) missing.push(i + 1);
+  }
+  const pathKeys = new Set(parts.map(p => p.path.join('_')));
+  const ambiguous = pathKeys.size !== parts.length;
+  const token = createHash('sha256').update(JSON.stringify(parts.map(p => p.name))).digest('hex');
+  return {
+    token,
+    parts,
+    missing,
+    ambiguous,
+    inferred: true,
     startedAt: parts.length ? Math.min(...parts.map(p => p.requestedAt)) : null,
-    endedAt: parts.length ? Math.max(...parts.map(p => p.modifiedAt)) : null };
+    endedAt: parts.length ? Math.max(...parts.map(p => p.modifiedAt)) : null
+  };
 }
 
 async function mergeLatestParts({ dir, outDir = dir, token, allowGaps = false }, ff) {
@@ -40,12 +68,38 @@ async function mergeLatestParts({ dir, outDir = dir, token, allowGaps = false },
   if (scan.ambiguous) throw new Error('Ижил дугаартай олон файл байна. Өөр оролдлогууд холилдсон байж болзошгүй тул автоматаар нэгтгэсэнгүй.');
   if (scan.missing.length && !allowGaps) throw new Error(`Дутуу хэсэг: ${scan.missing.join(', ')}. Зөвхөн байгаа хэсгүүдийг нэгтгэх сонголтыг ашиглана уу.`);
   if (scan.parts.some(p => !p.size || Date.now() - p.modifiedAt < 10000)) throw new Error('Хоосон эсвэл бичигдэж буй аудио байна. Үүсгэх ажил зогссоны дараа дахин шалгана уу.');
+  
+  const resumeDir = path.join(dir, 'resume-v1');
+  const cacheMap = {};
+  try {
+    const cacheNames = await fs.readdir(resumeDir);
+    for (const cn of cacheNames) {
+      if (cn.endsWith('.json')) {
+        const cData = JSON.parse(await fs.readFile(path.join(resumeDir, cn), 'utf8'));
+        if (cData.file) cacheMap[cData.file] = cData;
+      }
+    }
+  } catch {}
+
   const segments = [];
+  const recoveredSentences = [];
   let totalDuration = 0;
   for (const part of scan.parts) {
     const info = await ff.probe(path.join(dir, part.name));
     if (!info.hasAudio || !(info.duration > 0)) throw new Error(`Аудио эвдэрсэн эсвэл хоосон: ${part.name}`);
-    segments.push({ part: part.index + 1, file: part.name, start: totalDuration, end: totalDuration + info.duration });
+    segments.push({ part: part.indexLabel || (part.major + 1), file: part.name, start: totalDuration, end: totalDuration + info.duration });
+
+    const hit = cacheMap[part.name];
+    if (hit && Array.isArray(hit.sentences)) {
+      for (const s of hit.sentences) {
+        recoveredSentences.push({
+          id: recoveredSentences.length,
+          text: s.text,
+          start: Math.round((s.start + totalDuration) * 100) / 100,
+          end: Math.round((s.end + totalDuration) * 100) / 100
+        });
+      }
+    }
     totalDuration += info.duration;
   }
   if ((await scanLatestParts(dir)).token !== token) throw new Error('Нэгтгэх үед эх файлууд өөрчлөгдлөө. Дахин шалгана уу.');
@@ -58,10 +112,22 @@ async function mergeLatestParts({ dir, outDir = dir, token, allowGaps = false },
     throw new Error('Нэгтгэсэн аудионы үргэлжлэх хугацаа таарахгүй байна. Үр дүнг бүрэн гэж үзэж болохгүй.');
   }
   const reportPath = path.join(outDir, base + '.json');
-  await fs.writeFile(reportPath, JSON.stringify({ complete: false,
-    note: 'Зөвхөн байгаа хэсгүүдийг нэгтгэв. Хуучин файлуудад ажлын ID, нийт хэсгийн тоо байхгүй тул бүлгийг хугацаагаар таамагласан. Дутуу хэсгийг нөхөөгүй. Төгсгөлийн хэсгүүд бүрэн эсэх тодорхойгүй.',
-    missingParts: scan.missing, duration: output.duration, segments }, null, 2));
-  return { audioPath, reportPath, duration: output.duration, count: segments.length, missing: scan.missing };
+  await fs.writeFile(reportPath, JSON.stringify({
+    complete: scan.missing.length === 0,
+    note: scan.missing.length === 0 ? 'Бүх хэсгүүдийг амжилттай нэгтгэв.' : 'Зарим дутуу хэсгийг алгасаж нэгтгэв.',
+    missingParts: scan.missing,
+    duration: output.duration,
+    segments,
+    sentences: recoveredSentences
+  }, null, 2));
+  return {
+    audioPath,
+    reportPath,
+    duration: output.duration,
+    count: segments.length,
+    missing: scan.missing,
+    sentences: recoveredSentences
+  };
 }
 async function scanAudioFolder(dir) {
   const parts = [];

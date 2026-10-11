@@ -7,6 +7,8 @@ const path = require('node:path');
 const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 const ff = require('./ffmpeg');
+const { planRecognitionChunks, stitchRecognitionChunks } = require('./whisper-chunks');
+const { recognizeWithRecovery } = require('./recognition-quality');
 
 /**
  * Local speech-to-text via whisper.cpp.
@@ -17,22 +19,65 @@ const ff = require('./ffmpeg');
 
 const MODEL_HOST = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main';
 
-function getGroqKey() {
-  if (process.env.GROQ_API_KEY) return process.env.GROQ_API_KEY;
+function getGroqKeys() {
+  const keys = [];
+  if (process.env.GROQ_API_KEY) {
+    keys.push(...process.env.GROQ_API_KEY.split(/[\r\n,;]+/).map(k => k.trim()).filter(Boolean));
+  }
   const candidates = [
     path.join(__dirname, '..', 'groq_key.txt'),
     path.join(__dirname, 'groq_key.txt'),
-    path.join(app?.getPath ? app.getPath('userData') : '', 'groq_key.txt')
+    path.join(process.cwd(), 'groq_key.txt'),
+    process.execPath ? path.join(path.dirname(process.execPath), 'groq_key.txt') : '',
+    path.join(app?.getPath ? app.getPath('userData') : '', 'groq_key.txt'),
+    'C:\\Users\\Gavl\\Desktop\\my project\\VIDEO EDITHOR\\capcut-editor\\groq_key.txt'
   ];
   for (const c of candidates) {
     if (c && fs.existsSync(c)) {
       try {
-        const k = fs.readFileSync(c, 'utf8').trim();
-        if (k) return k;
+        const content = fs.readFileSync(c, 'utf8');
+        const lines = content.split(/[\r\n,;]+/).map(k => k.trim()).filter(Boolean);
+        keys.push(...lines);
       } catch {}
     }
   }
-  return '';
+  return Array.from(new Set(keys));
+}
+
+function getGroqKey() {
+  const keys = getGroqKeys();
+  return keys[0] || '';
+}
+
+function saveGroqKeys(keysInput) {
+  const lines = (Array.isArray(keysInput) ? keysInput : String(keysInput || '').split(/[\r\n,;]+/))
+    .map(k => k.trim())
+    .filter(Boolean);
+  const uniqueKeys = Array.from(new Set(lines));
+  const fileContent = uniqueKeys.join('\n') + (uniqueKeys.length ? '\n' : '');
+
+  const targets = [
+    path.join(__dirname, '..', 'groq_key.txt'),
+    path.join(__dirname, 'groq_key.txt'),
+    path.join(process.cwd(), 'groq_key.txt'),
+    process.execPath ? path.join(path.dirname(process.execPath), 'groq_key.txt') : '',
+    path.join(app?.getPath ? app.getPath('userData') : '', 'groq_key.txt'),
+    'C:\\Users\\Gavl\\Desktop\\my project\\VIDEO EDITHOR\\capcut-editor\\groq_key.txt'
+  ];
+
+  let written = 0;
+  for (const t of targets) {
+    if (t) {
+      try {
+        const dir = path.dirname(t);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(t, fileContent, 'utf8');
+        written++;
+      } catch {}
+    }
+  }
+
+  return { ok: true, count: uniqueKeys.length, keys: uniqueKeys };
 }
 
 const MODELS = [
@@ -133,9 +178,18 @@ async function downloadModel(id, onProgress) {
 function extractAudio(videoPath, { start = 0, duration, signal } = {}) {
   const out = path.join(os.tmpdir(), `capcut-stt-${process.pid}-${require('node:crypto').randomBytes(6).toString('hex')}.wav`);
   return new Promise((resolve, reject) => {
+    const args = ['-y'];
+    if (start > 0) {
+      args.push('-ss', String(start), '-i', videoPath);
+    } else {
+      args.push('-i', videoPath);
+    }
+    if (duration) args.push('-t', String(duration));
+    args.push('-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', out);
+
     execFile(
       ff.FFMPEG,
-      ['-y', '-ss', String(start), '-i', videoPath, ...(duration ? ['-t', String(duration)] : []), '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', out],
+      args,
       { maxBuffer: 1024 * 1024 * 16, windowsHide: true, signal },
       (err, _stdout, stderr) => {
         if (err) { try {fs.unlinkSync(out);} catch {} reject(new Error(stderr || err.message)); }
@@ -145,109 +199,177 @@ function extractAudio(videoPath, { start = 0, duration, signal } = {}) {
   });
 }
 
-async function transcribeWithGroq(mediaPath, { language = 'mn', onProgress, signal, start = 0, duration, apiKey } = {}) {
-  const key = apiKey || getGroqKey();
-  if (!key) throw new Error('Groq API түлхүүр олдсонгүй. Тохиргоондоо Groq түлхүүрээ оруулна уу.');
+async function transcribeWithGroq(mediaPath, { language = 'mn', onProgress, signal, start = 0, duration, apiKey, prompt, forceFresh = false } = {}) {
+  const keys = apiKey ? [apiKey] : getGroqKeys();
+  if (!keys.length) throw new Error('Groq API түлхүүр олдсонгүй. Тохиргоондоо Groq түлхүүрээ оруулна уу.');
 
   const probe = await ff.probe(mediaPath).catch(() => null);
   if (probe && !probe.hasAudio) {
-    return { segments: [], language: 'unknown', text: '', duration: probe.duration || 0 };
+    return { segments: [], words: [], language: 'unknown', text: '', duration: probe.duration || 0 };
   }
 
   const totalDuration = duration || (probe?.duration ? Math.max(0, probe.duration - start) : 0);
-  const CHUNK_SECONDS = 1200; // 20 mins per chunk (under 5MB at 32k mono)
-  const numChunks = totalDuration > 0 ? Math.ceil(totalDuration / CHUNK_SECONDS) : 1;
+  const lang = (language === 'auto' || !language) ? 'mn' : language;
+  const userPrompt = prompt ? String(prompt).trim().slice(0, 400) : '';
+
+  const chunks = planRecognitionChunks(start, totalDuration);
+  const numChunks = chunks.length;
 
   const allSegments = [];
-  const lang = (language === 'auto' || !language) ? 'mn' : language;
+  const allWords = [];
+  const recognizedChunks = [];
+  let currentKeyIndex = 0;
 
-  for (let i = 0; i < numChunks; i++) {
-    signal?.throwIfAborted();
-    const chunkStart = start + i * CHUNK_SECONDS;
-    const chunkDur = totalDuration > 0 ? Math.min(CHUNK_SECONDS, totalDuration - i * CHUNK_SECONDS) : undefined;
+  const cacheDir = path.join(path.dirname(modelDir()), 'caption-recognition-cache');
+  try { fs.mkdirSync(cacheDir, { recursive: true }); } catch {}
+  const sourceStat = fs.existsSync(mediaPath) ? fs.statSync(mediaPath) : { size: 0, mtimeMs: 0 };
 
-    onProgress?.({
-      stage: 'transcribe',
-      pct: Math.round(((i + 0.1) / numChunks) * 90),
-      message: numChunks > 1 ? `⚡ Groq Cloud: ${i + 1}/${numChunks} хэсгийг уншиж байна...` : '⚡ Groq Cloud: Монгол яриаг 5 секундэд таньж байна...'
-    });
+  async function recognizeChunk(chunk, fileBuffer) {
+    const chunkStart = chunk.start, chunkDur = chunk.duration;
+    const chunkCacheKey = require('node:crypto').createHash('sha256').update(JSON.stringify({
+      v: 'groq-v7-quality-pcm',
+      file: path.resolve(mediaPath),
+      size: sourceStat.size,
+      mtime: sourceStat.mtimeMs,
+      chunkStart,
+      chunkDur,
+      lang,
+      userPrompt
+    })).digest('hex');
+    const chunkCacheFile = path.join(cacheDir, `groq-chunk-${chunkCacheKey}.json`);
 
-    const tmpChunk = path.join(os.tmpdir(), `capcut-groq-${process.pid}-${Date.now()}-${i}.mp3`);
-    try {
-      await new Promise((resolve, reject) => {
-        execFile(
-          ff.FFMPEG,
-          [
-            '-y',
-            '-ss', String(chunkStart),
-            '-i', mediaPath,
-            ...(chunkDur ? ['-t', String(chunkDur)] : []),
-            '-vn',
-            '-ac', '1',
-            '-ar', '16000',
-            '-b:a', '32k',
-            tmpChunk
-          ],
-          { maxBuffer: 1024 * 1024 * 16, windowsHide: true, signal },
-          (err, _stdout, stderr) => {
-            if (err) reject(new Error(stderr || err.message));
-            else resolve();
-          }
-        );
-      });
+    let data = null;
+    if (!forceFresh && fs.existsSync(chunkCacheFile)) {
+      try {
+        const cached = JSON.parse(fs.readFileSync(chunkCacheFile, 'utf8'));
+        if (cached && (Array.isArray(cached.words) || Array.isArray(cached.segments))) {
+          data = cached;
+        }
+      } catch {}
+    }
 
-      const fileBuffer = fs.readFileSync(tmpChunk);
-      const form = new FormData();
-      form.append('file', new Blob([fileBuffer]), `chunk_${i}.mp3`);
-      form.append('model', 'whisper-large-v3');
-      form.append('response_format', 'verbose_json');
-      form.append('language', lang);
+    if (!data) {
+      let lastErrText = '';
+      let success = false;
 
-      const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${key}` },
-        body: form,
-        signal
-      });
+      const maxChunkAttempts = Math.max(4, keys.length * 3);
+      for (let attempt = 0; attempt < maxChunkAttempts; attempt++) {
+        signal?.throwIfAborted();
+        const activeKey = keys[(currentKeyIndex + attempt) % keys.length];
+        const form = new FormData();
+        form.append('file', new Blob([fileBuffer]), 'speech.wav');
+        form.append('model', 'whisper-large-v3');
+        form.append('response_format', 'verbose_json');
+        form.append('language', lang);
+        form.append('timestamp_granularities[]', 'word');
+        form.append('timestamp_granularities[]', 'segment');
+        form.append('temperature', '0');
+        if (userPrompt) {
+          form.append('prompt', userPrompt);
+        }
 
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(`Groq API алдаа (${res.status}): ${errText}`);
-      }
+        const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${activeKey}` },
+          body: form,
+          signal
+        });
 
-      const data = await res.json();
-      if (Array.isArray(data.segments)) {
-        for (const seg of data.segments) {
-          const sStart = chunkStart + (seg.start ?? 0);
-          const sEnd = chunkStart + (seg.end ?? 0);
-          const text = String(seg.text || '').trim();
-          if (text && sEnd > sStart) {
-            allSegments.push({
-              id: allSegments.length,
-              start: sStart,
-              end: sEnd,
-              duration: sEnd - sStart,
-              text
-            });
+        if (res.ok) {
+          data = await res.json();
+          currentKeyIndex = (currentKeyIndex + attempt) % keys.length;
+          success = true;
+          try { fs.writeFileSync(chunkCacheFile, JSON.stringify(data)); } catch {}
+          break;
+        }
+
+        lastErrText = await res.text();
+        if (res.status !== 429) {
+          throw new Error(`Groq API алдаа (${res.status}): ${lastErrText}`);
+        }
+
+        // If all keys tested and wait time is <= 240s, do a friendly countdown wait and retry
+        if ((attempt + 1) % keys.length === 0) {
+          const waitMatch = /try again in\s+(?:(\d+)\s*m(?:in)?)?\s*([\d.]+)\s*s/i.exec(lastErrText);
+          const waitSec = waitMatch ? Math.ceil(Number(waitMatch[1] || 0) * 60 + Number(waitMatch[2] || 0)) : 0;
+          if (waitSec > 0 && waitSec <= 240 && attempt + 1 < maxChunkAttempts) {
+            for (let s = waitSec + 1; s > 0; s--) {
+              signal?.throwIfAborted();
+              onProgress?.({
+                stage: 'transcribe',
+                message: `⚡ Groq Cloud: Эрх сэргэхийг түр хүлээж байна (${s} сек)...`
+              });
+              await new Promise((r) => setTimeout(r, 1000));
+            }
           }
         }
       }
-    } finally {
-      try { fs.unlinkSync(tmpChunk); } catch {}
+
+      if (!success || !data) {
+        let waitMsg = '';
+        const waitMatch = /try again in ([^.]+)/i.exec(lastErrText);
+        if (waitMatch) {
+          waitMsg = ` (${waitMatch[1]} хүлээх шаардлагатай)`;
+        }
+        throw new Error(`Groq үнэгүй эрхийн хязгаар (цагт 7,200 сек буюу 2 цагийн яриа) түр хүрсэн байна${waitMsg}. Хэдэн минут хүлээгээд дахин дарна уу эсвэл groq_key.txt-д нэмэлт үнэгүй түлхүүр оруулна уу (console.groq.com/keys).`);
+      }
     }
+    return data;
   }
 
+  for (let i = 0; i < numChunks; i++) {
+    signal?.throwIfAborted();
+    const chunk = chunks[i];
+    onProgress?.({ stage: 'transcribe', pct: Math.round(((i + 0.1) / numChunks) * 95),
+      message: `⚡ Groq Cloud: ${i + 1}/${numChunks} хэсгийг таньж байна...` });
+    const words = await recognizeWithRecovery(chunk, {
+      signal,
+      readAudio: async part => {
+        const wav = await extractAudio(mediaPath, { start: part.start, duration: part.duration, signal });
+        try { return fs.readFileSync(wav); } finally { try { fs.unlinkSync(wav); } catch {} }
+      },
+      recognize: recognizeChunk,
+      onRetry: part => onProgress?.({ stage: 'transcribe',
+        message: `⚡ ${Math.floor(part.start / 60)}:${String(Math.floor(part.start % 60)).padStart(2, '0')} хэсгийн үг, цаг зөрүүтэй байна. Богино хэсгээр дахин таньж байна...` })
+    });
+    recognizedChunks.push({ chunk, words });
+  }
+
+  // Resolve adjacent observations jointly: timestamp jitter can put the same
+  // word on opposite sides of a boundary in two responses.
+  const stitchedWords = stitchRecognitionChunks(recognizedChunks);
+  allWords.push(...stitchedWords.map(({ word, start: wordStart, end, timingSource }) => ({
+    word, start: Math.round(wordStart * 1000) / 1000,
+    end: Math.round(end * 1000) / 1000, ...(timingSource ? { timingSource } : {})
+  })));
+  // Segment text must use the same retained words as the word transcript,
+  // otherwise context text would be restored twice by segment fallback.
+  const groups = new Map();
+  for (const word of stitchedWords) {
+    const key = `${word.chunkIndex}:${word.segmentIndex ?? -1}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(word);
+  }
+  for (const group of groups.values()) {
+    const sStart = group[0].start;
+    const sEnd = group[group.length - 1].end;
+    allSegments.push({ id: allSegments.length, start: sStart, end: sEnd,
+      duration: sEnd - sStart, text: group.map(word => word.word).join(' ') });
+  }
+
+  allSegments.sort((a, b) => a.start - b.start);
+
   onProgress?.({ stage: 'transcribe', pct: 100, message: '⚡ Groq танилт амжилттай дууслаа!' });
-  return { segments: allSegments, language: lang };
+  return { segments: allSegments, words: allWords, language: lang };
 }
 
 /**
  * Transcribe a media file into { id, start, end, text } segments.
  * `language` is a two-letter code, or 'auto' to detect.
  */
-async function transcribe(mediaPath, { model = 'groq-whisper-large-v3', language = 'auto', onProgress, start = 0, duration, signal, threads, quality = false, apiKey } = {}) {
+async function transcribe(mediaPath, { model = 'groq-whisper-large-v3', language = 'auto', onProgress, start = 0, duration, signal, threads, quality = false, apiKey, prompt, forceFresh = false, _skipQualityValidation = false } = {}) {
   if (model.startsWith('groq')) {
-    return transcribeWithGroq(mediaPath, { language, onProgress, signal, start, duration, apiKey });
+    return transcribeWithGroq(mediaPath, { language, onProgress, signal, start, duration, apiKey, prompt, forceFresh });
   }
 
   const bin = binary();
@@ -260,12 +382,12 @@ async function transcribe(mediaPath, { model = 'groq-whisper-large-v3', language
   if (!fs.existsSync(weights)) throw new Error(`Model "${model}" is not downloaded yet.`);
   // Reuse recognition when only caption layout or script matching changes.
   const sourceStat = fs.statSync(mediaPath), weightStat = fs.statSync(weights);
-  const cacheKey = require('node:crypto').createHash('sha256').update(JSON.stringify({ version: 1,
+  const cacheKey = require('node:crypto').createHash('sha256').update(JSON.stringify({ version: 2, checked: !_skipQualityValidation,
     file: path.resolve(mediaPath), size: sourceStat.size, modified: sourceStat.mtimeMs,
     weights, weightSize: weightStat.size, weightModified: weightStat.mtimeMs, language, start, duration, quality })).digest('hex');
   const cacheDir = path.join(path.dirname(modelDir()), 'caption-recognition-cache');
   const cacheFile = path.join(cacheDir, cacheKey + '.json');
-  if (quality) {
+  if (quality && !forceFresh) {
     try {
       const saved = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
       if (saved.segments?.length && saved.segments.every(s => typeof s.text === 'string' && Number.isFinite(s.start) && Number.isFinite(s.end) && s.end > s.start)) {
@@ -299,6 +421,14 @@ async function transcribe(mediaPath, { model = 'groq-whisper-large-v3', language
         '-of', outBase
       ];
       const proc = spawn(bin, args, { windowsHide: true, signal });
+      const killTree = () => {
+          try {
+            if (proc?.pid) {
+              execFile('taskkill', ['/F', '/T', '/PID', String(proc.pid)], { windowsHide: true }, () => {});
+            }
+          } catch {}
+      };
+      signal?.addEventListener('abort', killTree, { once: true });
       let stderr = '';
 
       // whisper.cpp reports progress on stderr as "[00:01:23.000 --> ...]" and "progress = 45%".
@@ -332,12 +462,13 @@ async function transcribe(mediaPath, { model = 'groq-whisper-large-v3', language
 
       proc.stderr.on('data', handleData);
       proc.stdout.on('data', handleData);
-      proc.on('error', reject);
-      proc.on('close', (code) =>
+      proc.on('error', error => { signal?.removeEventListener('abort', killTree); reject(error); });
+      proc.on('close', (code) => {
+        signal?.removeEventListener('abort', killTree);
         code === 0
           ? resolve()
           : reject(new Error(stderr.split('\n').slice(-10).join('\n') || `whisper exited ${code}`))
-      );
+      });
     });
 
     const jsonPath = `${outBase}.json`;
@@ -352,14 +483,47 @@ async function transcribe(mediaPath, { model = 'groq-whisper-large-v3', language
       .filter((s) => s.text && s.end > s.start);
 
     try { fs.unlinkSync(jsonPath); } catch { /* best effort */ }
-    const result = { segments, language: data.result?.language ?? language };
-    if (quality && segments.length && !signal?.aborted) {
+    let result = { segments, language: data.result?.language ?? language };
+    if (quality && !_skipQualityValidation) {
+      const originalWave = fs.readFileSync(wav);
+      const { readWaveActivity } = require('./recognition-quality');
+      const actualDuration = readWaveActivity(originalWave).duration;
+      const initialChunk = { start, duration: actualDuration };
+      const relativeResult = value => ({ ...value, segments: value.segments.map(s => ({ ...s, start: s.start - start, end: s.end - start })) });
+      const checkedWords = await recognizeWithRecovery(initialChunk, {
+        signal,
+        readAudio: async part => {
+          if (part === initialChunk) return originalWave;
+          const sample = await extractAudio(mediaPath, { start: part.start, duration: part.duration, signal });
+          try { return fs.readFileSync(sample); } finally { try { fs.unlinkSync(sample); } catch {} }
+        },
+        recognize: async part => {
+          if (part === initialChunk) return relativeResult(result);
+          const retry = await transcribe(mediaPath, { model, language, threads, signal,
+            start: part.start, duration: part.duration, quality: true, forceFresh: true, _skipQualityValidation: true });
+          return { ...retry, segments: retry.segments.map(s => ({ ...s, start: s.start - part.start, end: s.end - part.start })) };
+        },
+        onRetry: part => onProgress?.({ stage: 'transcribe',
+          message: `${Math.floor(part.start / 60)}:${String(Math.floor(part.start % 60)).padStart(2, '0')} хэсгийн танилтыг богино хэсгүүдээр дахин шалгаж байна...` })
+      });
+      const words = checkedWords.map(w => ({ ...w, start: start + w.start, end: start + w.end }));
+      const groups = new Map();
+      for (const word of words) {
+        const key = word.segmentIndex ?? -1;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(word);
+      }
+      result = { ...result, words, segments: [...groups.values()].map((group, id) => ({ id,
+        start: group[0].start, end: group[group.length - 1].end, text: group.map(w => w.word).join(' ') })) };
+    }
+    if (quality && result.segments.length && !signal?.aborted) {
       try { fs.mkdirSync(cacheDir, { recursive: true }); fs.writeFileSync(cacheFile, JSON.stringify(result)); } catch {}
     }
     return result;
   } finally {
     try { fs.unlinkSync(wav); } catch { /* best effort */ }
+    try { fs.unlinkSync(`${outBase}.json`); } catch { /* best effort */ }
   }
 }
 
-module.exports = { status, downloadModel, transcribe, MODELS };
+module.exports = { status, downloadModel, transcribe, MODELS, getGroqKeys, saveGroqKeys };

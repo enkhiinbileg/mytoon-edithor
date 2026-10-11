@@ -26,6 +26,8 @@ contextBridge.exposeInMainWorld('api', {
   waveform: (filePath) => ipcRenderer.invoke('media:waveform', filePath),
   clipThumbnails: (filePath, timestamps) =>
     ipcRenderer.invoke('media:clipThumbnails', { filePath, timestamps }),
+  getCachedThumbnails: (filePath) =>
+    ipcRenderer.invoke('media:getCachedThumbnails', filePath),
   sceneDetect: (filePath, threshold) =>
     ipcRenderer.invoke('media:sceneDetect', { filePath, threshold }),
 
@@ -42,6 +44,7 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('export:progress', handler);
   },
   showItemInFolder: (p) => ipcRenderer.invoke('shell:showItem', p),
+  openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
   copyFile: (source, target) => ipcRenderer.invoke('file:copy', { source, target }),
 
   // --- settings (secrets are write-only: reads return booleans) ---
@@ -55,7 +58,9 @@ contextBridge.exposeInMainWorld('api', {
   openTxtFile: () => ipcRenderer.invoke('dialog:openTxt'),
   openAudioFileDialog: () => ipcRenderer.invoke('dialog:openAudioFile'),
   alignAudioScript: (spec) => ipcRenderer.invoke('audio:alignScript', spec),
+  renderTimelineSpeech: (spec) => ipcRenderer.invoke('audio:renderTimelineSpeech', spec),
   cancelCaptionAlignment: () => ipcRenderer.invoke('audio:cancelAlign'),
+  aiFixMongolianCaptions: (lines) => ipcRenderer.invoke('captions:aiFixSpelling', lines),
   onVoiceAlignProgress: (cb) => {
     const h = (_e, p) => cb(p);
     ipcRenderer.on('voice-align:progress', h);
@@ -93,6 +98,7 @@ contextBridge.exposeInMainWorld('api', {
   recapStatus: () => ipcRenderer.invoke('recap:status'),
   setupRecapDownloader: () => ipcRenderer.invoke('recap:setup'),
   runFastRecap: (spec) => ipcRenderer.invoke('recap:run', spec),
+  startDubPipeline: (spec) => ipcRenderer.invoke('recap:startDubPipeline', spec),
   cancelFastRecap: () => ipcRenderer.invoke('recap:cancel'),
   onRecapProgress: (cb) => {
     const h = (_e, p) => cb(p);
@@ -102,6 +108,8 @@ contextBridge.exposeInMainWorld('api', {
 
   // --- auto-dub pipeline ---
   whisperStatus: () => ipcRenderer.invoke('whisper:status'),
+  getGroqKeys: () => ipcRenderer.invoke('whisper:getGroqKeys'),
+  saveGroqKeys: (text) => ipcRenderer.invoke('whisper:saveGroqKeys', text),
   downloadWhisperModel: (model) => ipcRenderer.invoke('whisper:download', model),
   onWhisperProgress: (cb) => {
     const h = (_e, p) => cb(p);

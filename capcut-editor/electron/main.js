@@ -2,6 +2,7 @@
 const { app, BrowserWindow, ipcMain, dialog, protocol, shell, screen } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const { Readable } = require('node:stream');
 const ff = require('./ffmpeg');
 const settings = require('./settings');
@@ -204,6 +205,14 @@ ipcMain.handle('media:clipThumbnails', async (_e, { filePath, timestamps }) => {
   }
 });
 
+ipcMain.handle('media:getCachedThumbnails', async (_e, filePath) => {
+  try {
+    return await ff.getCachedFrames(filePath);
+  } catch {
+    return [];
+  }
+});
+
 ipcMain.handle('media:sceneDetect', async (_e, { filePath, threshold }) => {
   try {
     const cuts = await ff.detectSceneCuts(filePath, threshold || 0.35);
@@ -280,6 +289,12 @@ ipcMain.handle('shell:showItem', async (_e, filePath) => {
   shell.showItemInFolder(filePath);
 });
 
+ipcMain.handle('shell:openExternal', async (_e, url) => {
+  if (url && /^https?:\/\//i.test(url)) {
+    shell.openExternal(url);
+  }
+});
+
 ipcMain.handle('file:copy', async (_e, { source, target }) => {
   try {
     fs.copyFileSync(source, target);
@@ -297,6 +312,8 @@ ipcMain.handle('settings:read', () => settings.readPublic());
 ipcMain.handle('settings:update', (_e, patch) => settings.update(patch));
 
 ipcMain.handle('whisper:status', () => whisper.status());
+ipcMain.handle('whisper:getGroqKeys', () => whisper.getGroqKeys());
+ipcMain.handle('whisper:saveGroqKeys', (_e, text) => whisper.saveGroqKeys(text));
 ipcMain.handle('whisper:download', (_e, model) =>
   whisper.downloadModel(model, (pct) => win?.webContents.send('whisper:progress', { model, pct }))
 );
@@ -435,6 +452,7 @@ ipcMain.handle('dub:synthesize', async (_e, { segments, options }) => {
 
 // Only one fast job may run: cache writes and character reservations have one owner.
 const fastRecap = require('./fast-recap');
+const recapDubPipeline = require('./recap-dub-pipeline');
 const recapDownload = require('./recap-download');
 let recapController = null;
 app.on('before-quit',()=>recapController?.abort());
@@ -451,12 +469,15 @@ ipcMain.handle('recap:run', async (_e, spec) => {
   const started = Date.now();
   const emit = p => win?.webContents.send('recap:progress', { ...p, elapsedSeconds: (Date.now()-started)/1000 });
   try {
-    const tr = translate.provider(spec.translation.providerId);
+    const tr = translate.provider(spec.translation?.providerId || 'groq');
     const translationKey = tr.keyField ? settings.secret(tr.keyField) : undefined;
-    const voice = voiceCredentials(spec.voice.providerId);
+    const voice = voiceCredentials(spec.voice?.providerId || 'elevenlabs');
     if (tr.needsKey && !translationKey) throw new Error('Save the translation API key first.');
-    if (!voice.apiKey || !spec.voice.voiceId) throw new Error('Save the voice API key and choose a voice first.');
-    const result = await dialog.showSaveDialog(win, { title: 'Save Mongolian recap', defaultPath: 'mongolian-recap.mp4', filters: [{name:'MP4 video',extensions:['mp4']},{name:'MKV video',extensions:['mkv']}] });
+    if (!voice.apiKey && !settings.secret('elevenLabsApiKey') && !process.env.ELEVENLABS_API_KEY) {
+      throw new Error('Save the ElevenLabs voice API key in API keys first.');
+    }
+    const defaultName = spec.source ? path.basename(spec.source, path.extname(spec.source)) + '_mongol.mp4' : 'mongolian-recap.mp4';
+    const result = await dialog.showSaveDialog(win, { title: 'Save Mongolian recap', defaultPath: defaultName, filters: [{name:'MP4 video',extensions:['mp4']},{name:'MKV video',extensions:['mkv']}] });
     if (result.canceled || !result.filePath) return { ok:false,canceled:true };
     spec = { ...spec, outPath: result.filePath };
     let acquisitionSeconds = 0;
@@ -465,24 +486,63 @@ ipcMain.handle('recap:run', async (_e, spec) => {
       emit({stage:'download'});
       const downloaded = await recapDownload.download(spec.url,spec.sourceLanguage,controller.signal,emit);
       spec.source = downloaded.source;
-      spec.segments = undefined; // Never apply another video's restored transcript to a URL.
+      spec.segments = undefined;
       if (downloaded.subtitle) {
         const rows = subtitles.parseSubtitleFile(downloaded.subtitle);
-        // Rolling or overlapping captions need transcription instead.
         if (rows.length && rows.every((s,i)=>!i || s.start>=rows[i-1].end)) spec.segments = rows;
       }
       acquisitionSeconds = (Date.now()-t)/1000;
     }
-    require('./recap-work').check(controller.signal);
-    const output = await fastRecap.run(spec,{ translation:translationKey,voice },controller.signal,emit);
-    output.acquisitionSeconds = acquisitionSeconds;
-    output.totalElapsedSeconds = (Date.now()-started)/1000;
-    output.targetMet = output.status === 'complete' && output.totalElapsedSeconds <= 600;
-    require('./recap-work').write(output.reportPath, output);
-    return { ok:true, ...output };
+
+    const output = await recapDubPipeline.runRecapDubPipeline({
+      source: spec.source,
+      outPath: spec.outPath,
+      segments: spec.segments,
+      whisperModel: spec.whisperModel || 'groq-whisper-large-v3',
+      sourceLanguage: spec.sourceLanguage || 'en',
+      targetLanguage: spec.language || 'Mongolian',
+      translationProvider: spec.translation?.providerId || 'groq',
+      translationModel: spec.translation?.model,
+      voiceId: spec.voice?.voiceId,
+      modelId: spec.voice?.modelId,
+      glossary: spec.glossary,
+      concurrency: spec.concurrency || 2
+    }, emit, controller.signal);
+
+    const totalElapsedSeconds = (Date.now() - started) / 1000;
+    return {
+      ok: true,
+      status: 'complete',
+      path: output.videoPath,
+      projectPath: output.projectPath,
+      projectId: output.projectId,
+      srtPath: output.srtPath,
+      duration: output.duration,
+      stats: output.stats,
+      chunkCount: output.chunkCount,
+      totalElapsedSeconds,
+      targetMet: totalElapsedSeconds <= 600,
+      issues: []
+    };
   } catch (err) {
     return { ok:false,error:String(err.message||err),reportPath:err.reportPath };
   } finally { recapController = null; }
+});
+
+ipcMain.handle('recap:startDubPipeline', async (_e, spec) => {
+  if (recapController || voiceController) return { ok: false, error: 'A recap is already running.' };
+  const controller = new AbortController();
+  recapController = controller;
+  const started = Date.now();
+  const emit = p => win?.webContents.send('recap:progress', { ...p, elapsedSeconds: (Date.now()-started)/1000 });
+  try {
+    const output = await recapDubPipeline.runRecapDubPipeline(spec, emit, controller.signal);
+    return { ok: true, ...output };
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  } finally {
+    recapController = null;
+  }
 });
 
 const voiceEdit = require('./voice-edit');
@@ -612,6 +672,44 @@ ipcMain.handle('audio:alignScript', async (_e, spec) => {
   } catch (err) {
     return { ok: false, error: captionController.signal.aborted ? 'Хадмал үүсгэхийг цуцаллаа.' : String(err.message || err) };
   } finally { captionController = null; }
+});
+
+ipcMain.handle('captions:aiFixSpelling', async (_e, lines = []) => {
+  try {
+    const mnFixer = require('./mongolian-text-fixer');
+    const segments = (Array.isArray(lines) ? lines : []).map((text, id) => ({ id, text: String(text || '') }));
+    const polished = await mnFixer.polishMongolianCaptionsWithAI(segments);
+    return { ok: true, corrected: polished.map((p) => p.text) };
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+});
+
+ipcMain.handle('audio:renderTimelineSpeech', async (_e, { clips = [], audio = [], duration }) => {
+  try {
+    audio = audio.filter(c => (c.volume ?? 1) > 0.001 && c.outPoint > c.inPoint);
+    clips = clips.filter(c => c.hasAudio && c.kind !== 'image' && (c.volume ?? 1) > 0.001 && c.outPoint > c.inPoint);
+    const audibleEnd = Math.max(0, ...[...audio, ...clips].map(c => c.start + c.outPoint - c.inPoint));
+    if (!(audibleEnd > 0)) throw new Error('Таймлайн дээр таних ярианы дуу алга.');
+    duration = duration > 0 ? Math.min(duration, audibleEnd) : audibleEnd;
+    const outPath = path.join(os.tmpdir(), `capcut-timeline-speech-${process.pid}-${Date.now()}.wav`);
+    await ff.exportTimeline({
+      clips,
+      audio,
+      duration,
+      format: 'wav',
+      audioSampleRate: 16000,
+      audioChannels: 1,
+      outPath
+    });
+
+    if (fs.existsSync(outPath) && fs.statSync(outPath).size > 500) {
+      return { ok: true, audioPath: outPath, duration, isTemp: true };
+    }
+    throw new Error('Timeline audio export failed');
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
 });
 
 ipcMain.handle('srt:sync', async (_e, spec) => {

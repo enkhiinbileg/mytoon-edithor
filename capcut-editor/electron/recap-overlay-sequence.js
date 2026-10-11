@@ -13,10 +13,10 @@ function transparentPng(width,height){
  const header=Buffer.alloc(13);header.writeUInt32BE(width);header.writeUInt32BE(height,4);header[8]=8;header[9]=6;
  return Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]),chunk('IHDR',header),chunk('IDAT',zlib.deflateSync(Buffer.alloc((width*4+1)*height))),chunk('IEND',Buffer.alloc(0))]);
 }
-function canSequenceOverlays(overlays,width,height,minCount=33){
+function canSequenceOverlays(overlays,width,height,minCount=1){
  let end=0;
  return overlays.length>=minCount && [...overlays].sort((a,b)=>a.start-b.start).every(o=>{
-  const ok=[o.start,o.end].every(Number.isFinite)&&o.start>=end-1e-6&&o.end>o.start&&o.x===0&&o.y===0&&o.w===width&&o.h===height&&(o.opacity??1)===1;
+  const ok=[o.start,o.end].every(Number.isFinite)&&o.start>=end-0.05&&o.end>o.start&&o.x===0&&o.y===0&&o.w===width&&o.h===height&&(o.opacity??1)===1;
   end=o.end;return ok;
  });
 }

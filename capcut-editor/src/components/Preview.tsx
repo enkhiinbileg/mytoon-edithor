@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from '../Icons';
 import { useEditor, getVideoTrackLevel } from '../store';
-import { clipEnd, clipDuration, type Clip, type MediaItem } from '../types';
+import { clipEnd, clipDuration, type Clip, type MediaItem, type Track } from '../types';
 import { effectById, filterById } from '../looks';
 import { rasterizeOverlay, REF_H } from '../overlayRaster';
 import { formatTime } from '../util';
@@ -10,84 +10,138 @@ import { interpolateClipKeyframes } from '../keyframes';
 function useSyncMedia(ref: React.RefObject<HTMLMediaElement | null>, clip: Clip, playing: boolean, time: number, volume = 0) {
   const seekingRef = useRef(false);
   const pendingSeekRef = useRef<number | null>(null);
+  const watchdogRef = useRef<any>(null);
   const lastClipIdRef = useRef<string>(clip.id);
 
-  // When clip changes, immediately clear any pending seeks from the previous clip
-  if (lastClipIdRef.current !== clip.id) {
-    lastClipIdRef.current = clip.id;
-    seekingRef.current = false;
-    pendingSeekRef.current = null;
-  }
+  // Store latest state in ref so event listeners NEVER re-bind on every time update
+  const stateRef = useRef({ clip, playing, time, volume });
+  stateRef.current = { clip, playing, time, volume };
 
   const isFreeze = Boolean(clip.isFreeze);
   const offset = isFreeze
     ? (clip.freezeTs != null ? clip.freezeTs : clip.inPoint)
     : clip.inPoint + Math.max(0, time - clip.start);
 
+  // When clip changes, immediately clear any pending seeks from previous clip
+  if (lastClipIdRef.current !== clip.id) {
+    lastClipIdRef.current = clip.id;
+    seekingRef.current = false;
+    pendingSeekRef.current = null;
+    if (watchdogRef.current) {
+      clearTimeout(watchdogRef.current);
+      watchdogRef.current = null;
+    }
+  }
+
+  // Safe executor for seeking with watchdog protection
+  const executeSeek = useCallback((targetTime: number) => {
+    const el = ref.current;
+    if (!el || el.readyState < 1) return;
+
+    const safeTarget = Math.max(0.000001, targetTime);
+    seekingRef.current = true;
+
+    // Watchdog: If seeked does not fire within 200ms (dropped by browser or decoder stall), unlock!
+    if (watchdogRef.current) clearTimeout(watchdogRef.current);
+    watchdogRef.current = setTimeout(() => {
+      watchdogRef.current = null;
+      if (seekingRef.current) {
+        seekingRef.current = false;
+        const pending = pendingSeekRef.current;
+        pendingSeekRef.current = null;
+        const currentEl = ref.current;
+        if (currentEl) {
+          const desired = pending !== null ? pending : (
+            Boolean(stateRef.current.clip.isFreeze)
+              ? (stateRef.current.clip.freezeTs != null ? stateRef.current.clip.freezeTs : stateRef.current.clip.inPoint)
+              : stateRef.current.clip.inPoint + Math.max(0, stateRef.current.time - stateRef.current.clip.start)
+          );
+          if (Math.abs(currentEl.currentTime - desired) > 0.045) {
+            try { currentEl.currentTime = Math.max(0.000001, desired); } catch {}
+          }
+        }
+      }
+    }, 200);
+
+    try {
+      el.currentTime = safeTarget;
+    } catch {
+      seekingRef.current = false;
+      if (watchdogRef.current) {
+        clearTimeout(watchdogRef.current);
+        watchdogRef.current = null;
+      }
+    }
+  }, [ref]);
+
+  // Primary state sync (play/pause and seek trigger)
   useEffect(() => {
     const element = ref.current;
     if (!element) return;
 
-    // Safety: if element is not seeking, clear seekingRef
-    if (!element.seeking && seekingRef.current) {
-      seekingRef.current = false;
+    element.volume = Math.min(1, Math.max(0, volume));
+
+    // Handle pause first
+    if (!playing || isFreeze) {
+      if (!element.paused) {
+        element.pause();
+      }
     }
 
-    // If already seeking, coalesce rapid scrubbing into pendingSeekRef to prevent decoder thrashing
+    // Frame-level threshold (0.045s, ~1.3 frames at 30fps) to eliminate single-frame thrashing loops
+    const threshold = playing ? 0.35 : 0.045;
+    const drift = Math.abs(element.currentTime - offset);
+
+    // If already seeking, record pending target and wait for current seek to finish
     if (seekingRef.current || element.seeking) {
       pendingSeekRef.current = offset;
       return;
     }
 
-    const drift = Math.abs(element.currentTime - offset);
-    const threshold = playing ? 0.4 : 0.02;
-
+    // Element is ready and drifted beyond threshold -> seek to offset
     if (element.readyState >= 1 && drift > threshold) {
-      seekingRef.current = true;
-      try {
-        element.currentTime = Math.max(0.000001, offset);
-      } catch {
-        seekingRef.current = false;
-      }
+      executeSeek(offset);
     }
 
-    element.volume = Math.min(1, Math.max(0, volume));
+    // Play if active and not seeking
     if (playing && !isFreeze) {
       if (element.paused && !seekingRef.current && !element.seeking && element.readyState >= 2) {
         void element.play().catch(() => {});
       }
-    } else {
-      if (!element.paused) {
-        element.pause();
-      }
     }
-  }, [clip.id, clip.inPoint, clip.start, time, playing, volume, ref, offset, isFreeze]);
+  }, [clip.id, clip.inPoint, clip.start, time, playing, volume, ref, offset, isFreeze, executeSeek]);
 
+  // Permanent event listeners attached once per element reference
   useEffect(() => {
     const element = ref.current;
     if (!element) return;
 
     const onSeeked = () => {
       seekingRef.current = false;
+      if (watchdogRef.current) {
+        clearTimeout(watchdogRef.current);
+        watchdogRef.current = null;
+      }
+
+      // If a pending seek was queued during rapid scrubbing, execute it immediately!
       if (pendingSeekRef.current !== null) {
         const next = pendingSeekRef.current;
         pendingSeekRef.current = null;
         const drift = Math.abs(element.currentTime - next);
-        if (drift > (playing ? 0.25 : 0.02)) {
-          seekingRef.current = true;
-          try {
-            element.currentTime = Math.max(0.000001, next);
-          } catch {
-            seekingRef.current = false;
-          }
+        const threshold = stateRef.current.playing ? 0.35 : 0.045;
+        if (drift > threshold) {
+          executeSeek(next);
           return;
         }
       }
 
-      // Seek has completed at accurate time; now safe to resume playback without jumping to t=0
-      if (playing && !isFreeze && element.paused) {
-        const currentTarget = offset;
-        const curDrift = Math.abs(element.currentTime - currentTarget);
+      // Safe to resume playback after seek if playing
+      const s = stateRef.current;
+      if (s.playing && !Boolean(s.clip.isFreeze) && element.paused) {
+        const curOffset = Boolean(s.clip.isFreeze)
+          ? (s.clip.freezeTs != null ? s.clip.freezeTs : s.clip.inPoint)
+          : s.clip.inPoint + Math.max(0, s.time - s.clip.start);
+        const curDrift = Math.abs(element.currentTime - curOffset);
         if (curDrift <= 0.35) {
           void element.play().catch(() => {});
         }
@@ -95,15 +149,16 @@ function useSyncMedia(ref: React.RefObject<HTMLMediaElement | null>, clip: Clip,
     };
 
     const onMediaReady = () => {
-      const currentTarget = offset;
-      const curDrift = Math.abs(element.currentTime - currentTarget);
-      if (curDrift > (playing ? 0.25 : 0.02)) {
-        seekingRef.current = true;
-        try {
-          element.currentTime = Math.max(0.000001, currentTarget);
-        } catch {
-          seekingRef.current = false;
-        }
+      const s = stateRef.current;
+      const curOffset = Boolean(s.clip.isFreeze)
+        ? (s.clip.freezeTs != null ? s.clip.freezeTs : s.clip.inPoint)
+        : s.clip.inPoint + Math.max(0, s.time - s.clip.start);
+      const curDrift = Math.abs(element.currentTime - curOffset);
+      const threshold = s.playing ? 0.35 : 0.045;
+      if (curDrift > threshold && !seekingRef.current && !element.seeking) {
+        executeSeek(curOffset);
+      } else if (s.playing && !Boolean(s.clip.isFreeze) && element.paused && !seekingRef.current && !element.seeking) {
+        void element.play().catch(() => {});
       }
     };
 
@@ -111,13 +166,18 @@ function useSyncMedia(ref: React.RefObject<HTMLMediaElement | null>, clip: Clip,
     element.addEventListener('loadedmetadata', onMediaReady);
     element.addEventListener('loadeddata', onMediaReady);
     element.addEventListener('canplay', onMediaReady);
+
     return () => {
       element.removeEventListener('seeked', onSeeked);
       element.removeEventListener('loadedmetadata', onMediaReady);
       element.removeEventListener('loadeddata', onMediaReady);
       element.removeEventListener('canplay', onMediaReady);
+      if (watchdogRef.current) {
+        clearTimeout(watchdogRef.current);
+        watchdogRef.current = null;
+      }
     };
-  }, [clip.id, clip.inPoint, clip.start, time, playing, ref]);
+  }, [ref, executeSeek]);
 }
 
 function VideoLayer({
@@ -126,7 +186,8 @@ function VideoLayer({
   time,
   playing,
   transitionStyle,
-  isHeld = false
+  isHeld = false,
+  coverMedia = null
 }: {
   clip: Clip;
   media: MediaItem;
@@ -134,42 +195,74 @@ function VideoLayer({
   playing: boolean;
   transitionStyle?: React.CSSProperties;
   isHeld?: boolean;
+  coverMedia?: MediaItem | null;
 }) {
   const ref = useRef<HTMLVideoElement>(null);
   const isImage = media.kind === 'image';
-  const [isReady, setIsReady] = useState(isImage);
+  const [frameReady, setFrameReady] = useState(isImage || !coverMedia);
+  const lastClipIdRef = useRef(clip.id);
+  const lastHeldRef = useRef(isHeld);
+
+  // Synchronously reset frameReady when clip changes or when held flips from true to false
+  if (lastClipIdRef.current !== clip.id || (lastHeldRef.current && !isHeld)) {
+    lastClipIdRef.current = clip.id;
+    lastHeldRef.current = isHeld;
+    if (!isImage && coverMedia) {
+      setFrameReady(false);
+    }
+  }
 
   useSyncMedia(ref, clip, isHeld ? false : playing, time);
 
-  // Monitor when video has genuinely decoded its target frame at clip.inPoint
+  // Use requestVideoFrameCallback to know the EXACT instant a decoded video frame reaches the compositor
   useEffect(() => {
-    if (isImage) {
-      setIsReady(true);
+    if (isImage || !coverMedia) {
+      setFrameReady(true);
       return;
     }
     const el = ref.current;
     if (!el) return;
 
-    const checkReady = () => {
-      const targetOffset = clip.inPoint + Math.max(0, time - clip.start);
-      const isAtTarget = Math.abs(el.currentTime - targetOffset) <= 0.35;
-      if (el.readyState >= 2 && isAtTarget && !el.seeking) {
-        setIsReady(true);
+    const videoEl = el as HTMLVideoElement;
+
+    let cancelled = false;
+
+    // Safety watchdog: Never cover for more than 350ms under any circumstance
+    const fallbackTimer = setTimeout(() => {
+      if (!cancelled) setFrameReady(true);
+    }, 350);
+
+    const onFramePresented = (_now: number, metadata?: any) => {
+      if (cancelled) return;
+      const mediaTime = metadata?.mediaTime ?? videoEl.currentTime;
+      if (mediaTime >= clip.inPoint - 0.35) {
+        clearTimeout(fallbackTimer);
+        setFrameReady(true);
+      } else {
+        if ('requestVideoFrameCallback' in videoEl) {
+          (videoEl as any).requestVideoFrameCallback(onFramePresented);
+        }
       }
     };
 
-    checkReady();
-    el.addEventListener('seeked', checkReady);
-    el.addEventListener('loadeddata', checkReady);
-    el.addEventListener('canplay', checkReady);
-    el.addEventListener('timeupdate', checkReady);
+    if (typeof (videoEl as any).requestVideoFrameCallback === 'function') {
+      (videoEl as any).requestVideoFrameCallback(onFramePresented);
+    } else {
+      const onTimeUpdate = () => {
+        if (videoEl.currentTime >= clip.inPoint - 0.2 && videoEl.readyState >= 2) {
+          clearTimeout(fallbackTimer);
+          videoEl.removeEventListener('timeupdate', onTimeUpdate);
+          if (!cancelled) setFrameReady(true);
+        }
+      };
+      videoEl.addEventListener('timeupdate', onTimeUpdate);
+    }
+
     return () => {
-      el.removeEventListener('seeked', checkReady);
-      el.removeEventListener('loadeddata', checkReady);
-      el.removeEventListener('canplay', checkReady);
-      el.removeEventListener('timeupdate', checkReady);
+      cancelled = true;
+      clearTimeout(fallbackTimer);
     };
-  }, [clip.id, clip.inPoint, clip.start, isImage, time]);
+  }, [clip.id, clip.inPoint, isImage, coverMedia]);
 
   const tf = interpolateClipKeyframes(clip, time);
   const effect = effectById(clip.effectId);
@@ -197,9 +290,8 @@ function VideoLayer({
     <div
       className={'video-layer' + (isHeld ? ' held-layer' : '')}
       style={{
-        opacity: isReady ? tf.opacity : 0,
-        visibility: isReady ? 'visible' : 'hidden',
-        transition: isImage ? undefined : 'opacity 0.06s ease',
+        opacity: tf.opacity,
+        visibility: 'visible',
         ...transitionStyle
       }}
     >
@@ -215,19 +307,37 @@ function VideoLayer({
           }}
         />
       ) : (
-        <video
-          ref={ref}
-          src={window.api.toMediaUrl(media.path)}
-          muted
-          preload="auto"
-          playsInline
-          style={style}
-          onPointerDown={(e) => {
-            if (isHeld) return;
-            e.stopPropagation();
-            useEditor.getState().select(clip.id);
-          }}
-        />
+        <>
+          <video
+            ref={ref}
+            src={window.api.toMediaUrl(media.path)}
+            muted
+            preload="auto"
+            playsInline
+            style={style}
+            onPointerDown={(e) => {
+              if (isHeld) return;
+              e.stopPropagation();
+              useEditor.getState().select(clip.id);
+            }}
+          />
+          {coverMedia && !frameReady && (
+            <img
+              src={window.api.toMediaUrl(coverMedia.path)}
+              alt=""
+              style={{
+                ...style,
+                position: 'absolute',
+                inset: 0,
+                width: '100%',
+                height: '100%',
+                objectFit: fitMode,
+                pointerEvents: 'none',
+                zIndex: 2
+              }}
+            />
+          )}
+        </>
       )}
     </div>
   );
@@ -264,7 +374,21 @@ function AudioLayer({
   return <audio ref={ref} src={window.api.toMediaUrl(media.path)} preload="auto" />;
 }
 
-function Overlay({clip, scale, selected, onDrag, time}: {clip: Clip; scale: number; selected: boolean; onDrag: (e: React.PointerEvent, c: Clip) => void; time: number}) {
+function Overlay({
+  clip,
+  track,
+  scale,
+  selected,
+  onDrag,
+  time
+}: {
+  clip: Clip;
+  track?: Track;
+  scale: number;
+  selected: boolean;
+  onDrag: (e: React.PointerEvent, c: Clip) => void;
+  time: number;
+}) {
   const [fontRev, setFontRev] = useState(0);
   useEffect(() => {
     const onFontUpdate = () => setFontRev((r) => r + 1);
@@ -275,6 +399,9 @@ function Overlay({clip, scale, selected, onDrag, time}: {clip: Clip; scale: numb
   const raster = useMemo(() => rasterizeOverlay(clip, 1), [clip.style, clip.sticker, fontRev]);
   if (!raster) return null;
   const tf = interpolateClipKeyframes(clip, time);
+  const overlayLevel = track ? parseInt(track.name.match(/\d+/)?.[0] || '1', 10) : 1;
+  const zIndex = 10 + overlayLevel + (selected ? 100 : 0);
+
   return (
     <img
       className={'overlay-item' + (selected ? ' selected' : '')}
@@ -287,7 +414,8 @@ function Overlay({clip, scale, selected, onDrag, time}: {clip: Clip; scale: numb
         width: raster.w * scale * tf.scale,
         height: raster.h * scale * tf.scale,
         transform: `translate(-50%, -50%) rotate(${tf.rotation}deg)`,
-        opacity: tf.opacity
+        opacity: tf.opacity,
+        zIndex
       }}
       onPointerDown={(e) => onDrag(e, clip)}
     />
@@ -649,6 +777,17 @@ export default function Preview() {
     }
   }, []);
 
+  // Pre-decode all project image media in browser memory so they paint in 0ms without delay
+  useEffect(() => {
+    for (const item of media) {
+      if (item.kind === 'image') {
+        const img = new Image();
+        img.src = window.api.toMediaUrl(item.path);
+        void img.decode().catch(() => {});
+      }
+    }
+  }, [media]);
+
   useEffect(() => {
     if (!playing) return;
     let frame = 0, last = performance.now();
@@ -749,29 +888,39 @@ export default function Preview() {
       const baseKey = `${t.id}-${m.path}`;
       const trackLevel = getVideoTrackLevel(t.id, tracks);
 
+      // Detect if transitioning from a freeze frame (image or clip.isFreeze)
+      const isFromFreeze =
+        prevClip &&
+        pm &&
+        (pm.kind === 'image' || Boolean(prevClip.isFreeze)) &&
+        Math.abs(clipEnd(prevClip) - activeClip.start) < 0.2;
+
+      // Keep cover image active during the cut transition window (within 0.45s)
+      const isNearCut = playhead >= activeClip.start - 0.05 && playhead < activeClip.start + 0.45;
+      const coverMedia = isFromFreeze && isNearCut ? pm : null;
+
       const base = {
         key: baseKey,
         clip: activeClip,
         media: m,
         time: playhead,
         playing,
-        transitionStyle: { zIndex: trackLevel } as React.CSSProperties,
-        isHeld: false
+        transitionStyle: { zIndex: trackLevel + 1 } as React.CSSProperties,
+        isHeld: false,
+        coverMedia
       };
 
       const result = [base];
 
       if (prevClip && pm && Math.abs(clipEnd(prevClip) - activeClip.start) < 0.15) {
         const hasTransition = prevClip.transitionId && prevClip.transitionId !== 'none';
-        const isDifferentMedia = pm.path !== m.path;
-        const isJumpCut = Math.abs(prevClip.outPoint - activeClip.inPoint) > 0.05;
 
         if (hasTransition) {
           const td = Math.min(prevClip.transitionDuration || 0.6, clipDuration(prevClip) * 0.9, clipDuration(activeClip) * 0.9);
           if (td >= 0.04 && playhead < activeClip.start + td) {
             const p = Math.max(0, (playhead - activeClip.start) / td);
-            const before: React.CSSProperties = { zIndex: 1 };
-            const after: React.CSSProperties = { zIndex: 2 };
+            const before: React.CSSProperties = { zIndex: trackLevel };
+            const after: React.CSSProperties = { zIndex: trackLevel + 1 };
             switch (prevClip.transitionId) {
               case 'wipeleft': after.clipPath = `inset(0 0 0 ${(1 - p) * 100}%)`; break;
               case 'wiperight': after.clipPath = `inset(0 ${(1 - p) * 100}% 0 0)`; break;
@@ -789,21 +938,10 @@ export default function Preview() {
               time: clipEnd(prevClip) - 1 / settings.fps,
               playing: false,
               transitionStyle: before,
-              isHeld: true
+              isHeld: true,
+              coverMedia: null
             });
           }
-        } else if ((isDifferentMedia || isJumpCut) && playhead >= activeClip.start && playhead < activeClip.start + 0.45) {
-          // Hold outgoing frame underneath active clip during cuts / transitions between freeze frame and video
-          // to prevent black frame while video element decodes.
-          result.unshift({
-            key: `${t.id}-${pm.path}-held-${prevClip.id}`,
-            clip: prevClip,
-            media: pm,
-            time: clipEnd(prevClip) - 1 / settings.fps,
-            playing: false,
-            transitionStyle: { zIndex: 1 },
-            isHeld: true
-          });
         }
       }
 
@@ -822,18 +960,20 @@ export default function Preview() {
             position: 'absolute',
             inset: 0
           } as React.CSSProperties,
-          isHeld: true
+          isHeld: true,
+          coverMedia: null
         });
       }
 
       return result;
     });
 
-  const overlays = tracks
+  const overlays = [...tracks]
+    .reverse()
     .filter((t) => t.kind === 'overlay' && !t.hidden)
     .flatMap((t) => {
       const c = findActiveClipInTrack(clipsByTrack.get(t.id) || [], playhead);
-      return c ? [c] : [];
+      return c ? [{ clip: c, track: t }] : [];
     });
 
   const audio = tracks
@@ -986,10 +1126,11 @@ export default function Preview() {
             {!clips.length && (
               <div className="stage-empty"><Icon name="media" /><span>Your video preview</span></div>
             )}
-            {overlays.map((c) => (
+            {overlays.map(({ clip: c, track: t }) => (
               <Overlay
                 key={c.id}
                 clip={c}
+                track={t}
                 scale={currentSize.h / REF_H}
                 selected={selected === c.id}
                 onDrag={drag}

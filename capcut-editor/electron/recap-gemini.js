@@ -41,10 +41,13 @@ async function createRecapGemini({ apiKey, model, progress, fetchImpl = fetch, w
   }
   async function reserve(url, tokens) {
     if (!tokens) return null;
-    const state = usage.get(url) || { budget: 200000, requests: [] };
+    const state = usage.get(url) || { budget: 4000000, requests: [], throttleActive: false };
     usage.set(url, state);
-    // A conservative local budget, refined by the server's actual quota on 429.
-    // Real promptTokenCount replaces the estimate after successful requests.
+    if (!state.throttleActive) {
+      const record = { time: now(), tokens };
+      state.requests.push(record);
+      return record;
+    }
     state.requests = state.requests.filter(r => now() - r.time < 65000);
     while (state.requests.length && state.requests.reduce((sum, r) => sum + r.tokens, 0) + tokens > state.budget) {
       await cooldown(Math.max(1, 65000 - (now() - state.requests[0].time)), 'Gemini токены лимитэд багтаахын тулд хүлээж байна');
@@ -79,8 +82,11 @@ async function createRecapGemini({ apiKey, model, progress, fetchImpl = fetch, w
       try { apiError = (await response.json())?.error || {}; } catch { /* Non-JSON error. */ }
       const detail = apiError.message || '';
       const quota = quotaInfo(apiError, response.headers);
-      if (response.status === 429 && quota.tokenLimit && usage.has(url)) usage.get(url).budget = Math.floor(quota.tokenLimit * 0.8);
-      const retryable = (response.status === 429 && !quota.zeroModelQuota && !quota.daily) || response.status >= 500;
+      if (response.status === 429 && quota.tokenLimit && usage.has(url)) {
+        const st = usage.get(url);
+        st.budget = Math.floor(quota.tokenLimit * 0.8);
+        st.throttleActive = true;
+      }
       const hint = response.status === 401 || response.status === 403
         ? ' Settings дотор Gemini API key болон API эрхээ шалгана уу.'
         : response.status === 429 ? ' Gemini хүсэлтийн лимит эсвэл quota хүрсэн байна.' : '';
@@ -111,15 +117,10 @@ async function createRecapGemini({ apiKey, model, progress, fetchImpl = fetch, w
     pageToken = data.nextPageToken;
   } while (pageToken);
 
-  const preferred = cleanModel(model);
-  // Prefer stable Flash Lite for bulk alignment: the user's quota dashboard
-  // gives Lite 500 requests/day versus 20 for Flash (a full job needs 37).
-  // Discovery proves availability, not remaining quota. Retain explicit choices
-  // and all existing quota/error handling; never invent model version numbers.
+  const preferred = cleanModel(model) || 'gemini-3.6-flash';
   const flash = available.filter(name => name.includes('flash')).sort((a, b) =>
-    Number(!/^gemini-\d+(?:\.\d+)*-flash(?:-lite)?(?:-\d+)?$/.test(a)) - Number(!/^gemini-\d+(?:\.\d+)*-flash(?:-lite)?(?:-\d+)?$/.test(b)) ||
+    Number(!/^gemini-\d+(?:\.\d+)*-flash(?:-\d+)?$/.test(a)) - Number(!/^gemini-\d+(?:\.\d+)*-flash(?:-\d+)?$/.test(b)) ||
     Number(/preview|exp/.test(a)) - Number(/preview|exp/.test(b)) ||
-    Number(!/-flash-lite(?:-|$)/.test(a)) - Number(!/-flash-lite(?:-|$)/.test(b)) ||
     b.localeCompare(a, 'en', { numeric: true }));
   const candidates = [...new Set([...(available.includes(preferred) ? [preferred] : []), ...flash])];
   if (!candidates.length) throw new Error('Gemini Auto-Cut-д ашиглах текстийн загвар олдсонгүй. Settings дотор Gemini API key болон загварын эрхээ шалгана уу.');

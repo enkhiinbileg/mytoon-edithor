@@ -23,7 +23,7 @@ const SYSTEM = `You translate transcript segments for a dubbed video.
 
 Rules:
 - Translate into natural, spoken {LANG} — the kind a narrator would actually say aloud, not literal or bookish phrasing.
-- Each segment is dubbed over a fixed slot of video, so keep the spoken length close to the original. Each input carries a "seconds" field: aim for a line that a narrator reads comfortably in about that time. Slightly shorter is better than longer.
+- Each segment is dubbed over a video slot. Each input carries a "seconds" field: keep the spoken length concise so a narrator reads comfortably (roughly 14 characters per second, so length should not exceed seconds * 15). Shorter is better than longer.
 - Preserve proper nouns, product names, and numbers.
 - Keep sentences flowing across segments: a sentence split over two segments should still read as one sentence.
 - Do not add commentary, notes, or anything the speaker did not say. If a segment is filler or noise, translate it as the nearest natural equivalent or return an empty string.

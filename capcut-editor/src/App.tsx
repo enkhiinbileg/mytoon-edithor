@@ -38,11 +38,19 @@ export default function App() {
   useEffect(() => {
     const handleOpenStudio = () => setScriptStudioOpen(true);
     const handleOpenAudioScript = () => setAudioScriptOpen(true);
+    const handleOpenAutoSync = () => {
+      setTab('text');
+      setTimeout(() => {
+        window.dispatchEvent(new CustomEvent('switch-text-tab-sync'));
+      }, 50);
+    };
     window.addEventListener('open-script-studio', handleOpenStudio);
     window.addEventListener('open-audio-script', handleOpenAudioScript);
+    window.addEventListener('open-auto-sync', handleOpenAutoSync);
     return () => {
       window.removeEventListener('open-script-studio', handleOpenStudio);
       window.removeEventListener('open-audio-script', handleOpenAudioScript);
+      window.removeEventListener('open-auto-sync', handleOpenAutoSync);
     };
   }, []);
   const [timelineHeight, setTimelineHeight] = useState(32);

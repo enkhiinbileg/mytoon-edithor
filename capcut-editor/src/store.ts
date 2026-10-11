@@ -57,7 +57,8 @@ interface EditorState {
 
   moveClip(id: string, start: number, trackId?: string): void;
   commitMoveClip(id: string, targetTrackId?: string, origTrackId?: string): void;
-  ensureLayerTrack(kind: 'video' | 'audio', forceNew?: boolean): Track;
+  ensureLayerTrack(kind: 'video' | 'audio' | 'overlay', forceNew?: boolean): Track;
+  ensureAvailableOverlayTrack(start: number, duration?: number): Track;
   trackHeightMode: 'compact' | 'normal' | 'large';
   setTrackHeightMode(mode: 'compact' | 'normal' | 'large'): void;
   setTrackHeight(trackId: string, height: number): void;
@@ -105,6 +106,13 @@ export function sortTracksCapCut(tracks: Track[]): Track[] {
   const overlays = tracks.filter(t => t.kind === 'overlay');
   const videos = tracks.filter(t => t.kind === 'video');
   const audios = tracks.filter(t => t.kind === 'audio');
+
+  // Overlay tracks: highest level on top (Overlay 3, Overlay 2, Overlay 1)
+  overlays.sort((a, b) => {
+    const numA = parseInt(a.name.match(/\d+/)?.[0] || '1', 10);
+    const numB = parseInt(b.name.match(/\d+/)?.[0] || '1', 10);
+    return numB - numA; // Descending: Overlay 2 sits ABOVE Overlay 1
+  });
 
   // Video tracks: highest level on top (Video 3, Video 2, Video 1)
   videos.sort((a, b) => {
@@ -354,10 +362,18 @@ export const useEditor = create<EditorState>((rawSet, get) => {
       const ov = s.tracks.find((t) => t.kind === 'overlay' && !t.locked);
       if (ov) return ov;
     }
+    const existingOfKind = s.tracks.filter(t => t.kind === kind);
+    let maxNum = 0;
+    for (const t of existingOfKind) {
+      const num = parseInt(t.name.match(/\d+/)?.[0] || '1', 10);
+      if (num > maxNum) maxNum = num;
+    }
+    const nextNum = Math.max(maxNum + 1, existingOfKind.length + 1);
+    const label = kind === 'video' ? 'Video' : kind === 'audio' ? 'Audio' : 'Overlay';
     const track: Track = {
       id: uid(),
       kind,
-      name: kind === 'video' ? 'Video 1' : kind === 'audio' ? 'Audio 1' : 'Overlay',
+      name: `${label} ${nextNum}`,
       muted: false,
       hidden: false,
       locked: false
@@ -415,8 +431,8 @@ export const useEditor = create<EditorState>((rawSet, get) => {
   },
 
   addTextClip: (preset) => {
-    const track = get().ensureTrack('overlay');
     const start = get().playhead;
+    const track = get().ensureAvailableOverlayTrack(start, DEFAULT_OVERLAY_SECONDS);
     const clip: Clip = {
       id: uid(),
       kind: 'text',
@@ -441,16 +457,17 @@ export const useEditor = create<EditorState>((rawSet, get) => {
       transitionId: 'none',
       transitionDuration: 0.6
     };
-    set((s) => ({ clips: [...s.clips, clip], selectedClipId: clip.id }));
+    set((s) => ({ clips: [...s.clips, clip], selectedClipId: clip.id, selectedClipIds: [clip.id] }));
   },
 
   addStickerClip: (emoji) => {
-    const track = get().ensureTrack('overlay');
+    const start = get().playhead;
+    const track = get().ensureAvailableOverlayTrack(start, DEFAULT_OVERLAY_SECONDS);
     const clip: Clip = {
       id: uid(),
       kind: 'sticker',
       trackId: track.id,
-      start: get().playhead,
+      start,
       inPoint: 0,
       outPoint: DEFAULT_OVERLAY_SECONDS,
       sticker: emoji,
@@ -470,16 +487,16 @@ export const useEditor = create<EditorState>((rawSet, get) => {
       transitionId: 'none',
       transitionDuration: 0.6
     };
-    set((s) => ({ clips: [...s.clips, clip], selectedClipId: clip.id }));
+    set((s) => ({ clips: [...s.clips, clip], selectedClipId: clip.id, selectedClipIds: [clip.id] }));
   },
 
-  ensureLayerTrack: (kind: 'video' | 'audio', forceNew = false) => {
+  ensureLayerTrack: (kind: 'video' | 'audio' | 'overlay', forceNew = false) => {
     const s = get();
     const tracksOfKind = s.tracks.filter((t) => t.kind === kind);
     if (!forceNew) {
       // If there is an existing empty unlocked non-main layer, reuse it
       const emptyTrack = tracksOfKind.find(
-        (t) => !t.locked && !s.clips.some((c) => c.trackId === t.id) && !isMainVideoTrack(t.id, s.tracks)
+        (t) => !t.locked && !s.clips.some((c) => c.trackId === t.id) && (kind !== 'video' || !isMainVideoTrack(t.id, s.tracks))
       );
       if (emptyTrack) return emptyTrack;
     }
@@ -492,11 +509,58 @@ export const useEditor = create<EditorState>((rawSet, get) => {
       }
     }
     const nextNum = maxNum + 1;
-    const label = kind === 'video' ? 'Video' : 'Audio';
+    const label = kind === 'video' ? 'Video' : kind === 'audio' ? 'Audio' : 'Overlay';
     const newTrack: Track = {
       id: uid(),
       kind,
       name: `${label} ${nextNum}`,
+      muted: false,
+      hidden: false,
+      locked: false
+    };
+    const newTracks = sortTracksCapCut([...s.tracks, newTrack]);
+    set({ tracks: newTracks });
+    return newTrack;
+  },
+
+  ensureAvailableOverlayTrack: (start: number, duration: number = DEFAULT_OVERLAY_SECONDS) => {
+    const s = get();
+    const end = start + duration;
+
+    // 1. Get all unlocked overlay tracks, sorted by layer level (Overlay 1, Overlay 2, ...)
+    const overlayTracks = s.tracks
+      .filter((t) => t.kind === 'overlay' && !t.locked)
+      .sort((a, b) => {
+        const numA = parseInt(a.name.match(/\d+/)?.[0] || '1', 10);
+        const numB = parseInt(b.name.match(/\d+/)?.[0] || '1', 10);
+        return numA - numB; // Ascending: check Layer 1 first, then Layer 2, etc.
+      });
+
+    // 2. Find the first track where [start, end] does not collide with any existing clip
+    for (const track of overlayTracks) {
+      const collides = s.clips.some((c) => {
+        if (c.trackId !== track.id) return false;
+        const cStart = c.start;
+        const cEnd = clipEnd(c);
+        return cStart < end - 0.05 && cEnd > start + 0.05;
+      });
+      if (!collides) {
+        return track;
+      }
+    }
+
+    // 3. If all existing overlay tracks collide (or none exist), create a new upper overlay layer track!
+    const allOverlays = s.tracks.filter((t) => t.kind === 'overlay');
+    let maxNum = 0;
+    for (const t of allOverlays) {
+      const num = parseInt(t.name.match(/\d+/)?.[0] || '1', 10);
+      if (num > maxNum) maxNum = num;
+    }
+    const nextNum = Math.max(maxNum + 1, allOverlays.length + 1);
+    const newTrack: Track = {
+      id: uid(),
+      kind: 'overlay',
+      name: `Overlay ${nextNum}`,
       muted: false,
       hidden: false,
       locked: false
@@ -1042,9 +1106,15 @@ export const useEditor = create<EditorState>((rawSet, get) => {
 
   addTrack: (kind) =>
     set((s) => {
-      const n = s.tracks.filter((t) => t.kind === kind).length + 1;
+      const existingOfKind = s.tracks.filter((t) => t.kind === kind);
+      let maxNum = 0;
+      for (const t of existingOfKind) {
+        const num = parseInt(t.name.match(/\d+/)?.[0] || '1', 10);
+        if (num > maxNum) maxNum = num;
+      }
+      const nextNum = Math.max(maxNum + 1, existingOfKind.length + 1);
       const label = kind === 'video' ? 'Video' : kind === 'audio' ? 'Audio' : 'Overlay';
-      const newTrack: Track = { id: uid(), kind, name: `${label} ${n}`, muted: false, hidden: false, locked: false };
+      const newTrack: Track = { id: uid(), kind, name: `${label} ${nextNum}`, muted: false, hidden: false, locked: false };
       return {
         tracks: sortTracksCapCut([...s.tracks, newTrack])
       };

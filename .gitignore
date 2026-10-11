@@ -33,5 +33,6 @@ Thumbs.db
 *.log
 *key*.txt
 groq_key.txt
+*cutline*.txt
 backup/autocut-before-fix/
 capcut-editor/repaired-projects/

@@ -18,11 +18,10 @@ function file() {
 }
 
 function read() {
-  if (cache) return cache;
   try {
     cache = JSON.parse(fs.readFileSync(file(), 'utf8'));
   } catch {
-    cache = {};
+    if (!cache) cache = {};
   }
   return cache;
 }
@@ -50,10 +49,11 @@ function decrypt(stored) {
     if (stored.startsWith('raw:')) {
       return Buffer.from(stored.slice(4), 'base64').toString('utf8');
     }
+    return stored;
   } catch {
+    if (typeof stored === 'string' && !stored.startsWith('enc:')) return stored;
     return '';
   }
-  return '';
 }
 
 const SECRET_KEYS = [
@@ -61,8 +61,27 @@ const SECRET_KEYS = [
   'geminiApiKey',
   'openaiApiKey',
   'elevenLabsApiKey',
-  'azureSpeechKey'
+  'azureSpeechKey',
+  'groqApiKey'
 ];
+
+function getGroqFileKey() {
+  if (process.env.GROQ_API_KEY) return process.env.GROQ_API_KEY;
+  const candidates = [
+    path.join(__dirname, '..', 'groq_key.txt'),
+    path.join(__dirname, 'groq_key.txt'),
+    path.join(app?.getPath ? app.getPath('userData') : '', 'groq_key.txt')
+  ];
+  for (const c of candidates) {
+    if (c && fs.existsSync(c)) {
+      try {
+        const k = fs.readFileSync(c, 'utf8').trim();
+        if (k) return k;
+      } catch {}
+    }
+  }
+  return '';
+}
 
 /** Values safe to hand to the renderer: secrets collapse to a boolean. */
 function readPublic() {
@@ -72,6 +91,9 @@ function readPublic() {
     out[k] = SECRET_KEYS.includes(k) ? Boolean(v) : v;
   }
   for (const k of SECRET_KEYS) if (!(k in out)) out[k] = false;
+  if (!out.groqApiKey && Boolean(getGroqFileKey())) {
+    out.groqApiKey = true;
+  }
   out.elevenLabsKeyPool = getKeyPoolPublic();
   return out;
 }
@@ -224,7 +246,14 @@ function update(patch) {
 
 /** Main-process only. Never send the result over IPC. */
 function secret(name) {
-  return decrypt(read()[name]);
+  const dec = decrypt(read()[name]);
+  if (!dec && name === 'groqApiKey') {
+    return getGroqFileKey();
+  }
+  if (!dec && name === 'geminiApiKey') {
+    return process.env.GEMINI_API_KEY || '';
+  }
+  return dec;
 }
 
 module.exports = {

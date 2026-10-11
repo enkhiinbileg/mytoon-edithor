@@ -95,6 +95,10 @@ export default function FastRecapPanel({ spec, ready, disabled, onBusy, onImport
           <ul>{result.issues.slice(0,8).map(i=><li key={i.id}>{time(i.start)} · +{i.overflow.toFixed(1)} сек · {i.text}</li>)}</ul></>}
       </>}
       <div className="dub-filerow">
+        {result.projectId&&<button className="btn primary" onClick={async()=>{
+          const { switchToProject } = await import('../project');
+          await switchToProject(result.projectId!);
+        }}>Төслийг нээх (Timeline)</button>}
         {result.path&&<button className="btn" onClick={()=>window.api.showItemInFolder(result.path!)}>Видео харах</button>}
         {result.path&&<button className="btn" onClick={()=>{void importPaths([result.path!]);}}>Media-д нэмэх</button>}
         {result.projectPath&&<button className="btn" onClick={()=>window.api.showItemInFolder(result.projectPath!)}>Засах project</button>}

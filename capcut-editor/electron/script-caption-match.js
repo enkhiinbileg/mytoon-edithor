@@ -34,8 +34,8 @@ const words = text => String(text).toLocaleLowerCase('mn').match(/[\p{L}\p{N}]+/
  * Robust fuzzy alignment between clean script sentences and Whisper recognized segments.
  * Replaces Whisper's noisy spelling with clean script text, keeping millisecond-accurate timestamps.
  */
-function matchScript(sentences, recognized, duration) {
-  if (!recognized || !recognized.length) {
+function matchScript(sentences, recognized, duration, actualWords = []) {
+  if ((!recognized || !recognized.length) && (!actualWords || !actualWords.length)) {
     throw new Error('Аудионоос яриа танигдсангүй.');
   }
   if (!sentences || !sentences.length) {
@@ -50,20 +50,34 @@ function matchScript(sentences, recognized, duration) {
     }));
   }
 
-  // Flatten recognized segments into timestamped tokens
+  // Use precise word-level timestamps if available, or flatten recognized segments
   const tokens = [];
-  for (const segment of recognized) {
-    if (!Number.isFinite(segment.start) || !Number.isFinite(segment.end) || segment.end <= segment.start) continue;
-    const list = words(segment.text);
-    if (!list.length) continue;
-    const segDur = segment.end - segment.start;
-    list.forEach((word, i) => {
-      tokens.push({
-        word,
-        start: Math.max(0, segment.start + (i / list.length) * segDur),
-        end: Math.min(duration, segment.start + ((i + 1) / list.length) * segDur)
+  if (Array.isArray(actualWords) && actualWords.length > 0) {
+    for (const w of actualWords) {
+      if (w.word && Number.isFinite(w.start) && Number.isFinite(w.end)) {
+        tokens.push({
+          word: w.word,
+          start: w.start,
+          end: w.end
+        });
+      }
+    }
+  }
+
+  if (tokens.length === 0) {
+    for (const segment of recognized) {
+      if (!Number.isFinite(segment.start) || !Number.isFinite(segment.end) || segment.end <= segment.start) continue;
+      const list = words(segment.text);
+      if (!list.length) continue;
+      const segDur = segment.end - segment.start;
+      list.forEach((word, i) => {
+        tokens.push({
+          word,
+          start: Math.max(0, segment.start + (i / list.length) * segDur),
+          end: Math.min(duration, segment.start + ((i + 1) / list.length) * segDur)
+        });
       });
-    });
+    }
   }
 
   if (!tokens.length) {
@@ -125,31 +139,33 @@ function matchScript(sentences, recognized, duration) {
     let start = tokens[bestStart].start;
     let end = tokens[bestEnd].end;
 
-    // Safety fallback: if no confident anchor, linearly advance based on word count
+    // Safety fallback: anchor to actual spoken audio tokens at cursor rather than guessing artificial durations
     if (bestScore < 0.35) {
-      const prevEnd = result.length > 0 ? result[result.length - 1].end : tokens[cursor]?.start || 0;
-      start = prevEnd;
-      const avgWordDur = (duration || 60) / Math.max(tokens.length, sentences.reduce((acc, s) => acc + words(s).length, 0));
-      end = Math.min(duration, start + expectedLen * Math.max(0.3, Math.min(1.2, avgWordDur)));
-      cursor = Math.min(totalTokens - 1, cursor + expectedLen);
+      const fallbackEndIdx = Math.min(totalTokens - 1, cursor + expectedLen - 1);
+      start = tokens[cursor]?.start ?? (result.length > 0 ? result[result.length - 1].end : 0);
+      end = tokens[fallbackEndIdx]?.end ?? (start + Math.max(0.4, expectedLen * 0.3));
+      cursor = Math.min(totalTokens - 1, fallbackEndIdx + 1);
     } else {
       cursor = Math.min(totalTokens - 1, bestEnd + 1);
     }
 
-    if (result.length > 0 && start < result[result.length - 1].end) {
-      start = result[result.length - 1].end;
+    if (result.length > 0) {
+      const prev = result[result.length - 1];
+      if (start < prev.end + 0.02) {
+        start = Math.round((prev.end + 0.03) * 1000) / 1000;
+      }
     }
     if (end <= start) {
-      end = start + Math.max(0.5, expectedLen * 0.35);
+      end = Math.round((start + Math.max(0.3, expectedLen * 0.28)) * 1000) / 1000;
     }
 
     result.push({
       id: index + 1,
       index,
       text,
-      start,
-      end,
-      duration: end - start,
+      start: Math.round(start * 1000) / 1000,
+      end: Math.round(end * 1000) / 1000,
+      duration: Math.round((end - start) * 1000) / 1000,
       method: 'script_word_anchors',
       confidence: Math.max(0.5, bestScore)
     });

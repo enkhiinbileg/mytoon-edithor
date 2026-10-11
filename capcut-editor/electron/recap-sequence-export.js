@@ -15,7 +15,7 @@ function isSimpleMutedSequence(clips) {
     const duration = clip.outPoint - clip.inPoint;
     const valid = Number.isFinite(clip.start) && clip.start >= 0
       && Number.isFinite(clip.inPoint) && clip.inPoint >= 0
-      && Number.isFinite(duration) && duration > 0 && clip.start >= end - 1e-6
+      && Number.isFinite(duration) && duration > 0 && clip.start >= end - 0.05
       && (clip.trackId ?? clip.layer ?? 0) === track
       && (clip.layer ?? 0) === (ordered[0].layer ?? 0)
       && (clip.opacity ?? 1) === 1 && (!clip.keyframes || clip.keyframes.length === 0)
@@ -85,7 +85,7 @@ async function normalizeSimpleSequence({ clips, width, height, fps, duration,
   let cursor = 0;
   for (const clip of [...clips].sort((a, b) => a.start - b.start)) {
     if (clip.start >= duration) break;
-    const startFrame = Math.min(totalFrames, Math.round(clip.start * fps));
+    const startFrame = Math.max(cursor, Math.min(totalFrames, Math.round(clip.start * fps)));
     const clipEnd = Math.min(duration, clip.start + clip.outPoint - clip.inPoint);
     const endFrame = clipEnd >= duration - 1e-7 ? totalFrames : Math.round(clipEnd * fps);
     if (startFrame > cursor) segments.push({ frames: startFrame - cursor });

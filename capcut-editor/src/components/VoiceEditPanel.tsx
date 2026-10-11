@@ -87,7 +87,7 @@ export default function VoiceEditPanel({initialSource,translation,providers,mode
     }}>
       <div>
         <div style={{ fontSize: 12, fontWeight: 700, color: '#fff', display: 'flex', alignItems: 'center', gap: 6 }}>
-          <span>🎙️</span> AI Скрипт Студи (ElevenLabs v3)
+          <span>🎙️</span> AI Скрипт Студи (ElevenLabs v4)
         </div>
         <div style={{ fontSize: 11, color: '#c4b5fd', marginTop: 2 }}>
           Монгол скриптээс шууд хоолой үүсгэж, манхва дүрсэнд 1 товшилтоор тааруулах
