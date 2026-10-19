@@ -3,18 +3,24 @@ import { useEditor } from '../store';
 import { importPaths } from '../importMedia';
 import type { Clip, MediaItem, Voice, ElevenKeyItem } from '../types';
 import { autoTagMongolianScript, clearTagsFromScript } from '../utils/autoTag';
-
 const uid = () => Math.random().toString(36).slice(2, 10);
 
-const MAX_SCRIPT_CHARS = 10000;
-const CHUNK_SIZE = 1000;
+const DEFAULT_CHUNK_SIZE = 9000;
 const DEFAULT_VOICE_ID = 'TX3LPaxmHKxFdv7VOQHJ'; // Liam (Premade - Free API compatible)
 
+const CHUNK_SIZE_OPTIONS = [
+  { value: 9000, label: '⚡ 9,000 (Ухаалаг)', desc: '10k дотор багтаасан найдвартай санал болгох хэмжээ' },
+  { value: 10000, label: '🚀 10,000 (Макс)', desc: 'ElevenLabs-ийн дээд хязгаар (Paid)' },
+  { value: 4500, label: '🛡️ 4,500 (Дундаж)', desc: 'Дунд зэргийн түлхүүрүүдэд' },
+  { value: 2500, label: '🌱 2,500 (Free)', desc: 'Үнэгүй эрхтэй түлхүүрүүдэд' },
+  { value: 1000, label: '✂️ 1,000 (Жижиг)', desc: 'Хуучин жижиг хэсгүүдээр хуваах' }
+];
+
 /**
- * Intelligently splits script into chunks of <= maxChars (1000 characters)
+ * Intelligently splits script into chunks of <= maxChars (default 9000 characters)
  * keeping complete sentences, clauses and natural pauses intact.
  */
-function splitScriptIntoChunks(text: string, maxChars = 1000): string[] {
+function splitScriptIntoChunks(text: string, maxChars = DEFAULT_CHUNK_SIZE): string[] {
   const trimmed = (text || '').trim();
   if (!trimmed) return [];
   if (trimmed.length <= maxChars) return [trimmed];
@@ -109,6 +115,12 @@ interface Props {
   isOpen: boolean;
   onClose: () => void;
   onSuccessNotice?: (msg: string) => void;
+}
+
+export function getModelCreditMultiplier(modelId: string): number {
+  const m = String(modelId || '').toLowerCase();
+  if (m.includes('turbo') || m.includes('flash')) return 0.5;
+  return 1.0;
 }
 
 export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: Props) {
@@ -237,6 +249,7 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
   const [mode, setMode] = useState<'hybrid' | 'freeze' | 'cut'>('hybrid');
   const [useVision, setUseVision] = useState<boolean>(false);
   const [panelPacing, setPanelPacing] = useState<'auto' | number>('auto');
+  const [chunkTargetSize, setChunkTargetSize] = useState<number>(DEFAULT_CHUNK_SIZE);
 
   const [busy, setBusy] = useState<boolean>(false);
   const [progressMsg, setProgressMsg] = useState<string>('');
@@ -427,10 +440,13 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
     }
   };
 
-  // Script metrics and chunk computation across Multi-Key Pool
+  // Script metrics and chunk computation across Multi-Key Pool (ElevenLabs tariff-aware)
   const metrics = useMemo(() => {
     const text = scriptText.trim();
     const charCount = text.length;
+
+    const creditMultiplier = getModelCreditMultiplier(modelId);
+    const estCredits = Math.ceil(charCount * creditMultiplier);
 
     const activeKeys = keyPool.filter((k) => k.enabled);
     const activeKeyCount = activeKeys.length;
@@ -455,9 +471,11 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
     }
 
     const maxCapacity = activeKeyCount > 0 ? totalRemaining : 10000;
+    const effectiveCharCapacity = Math.floor(maxCapacity / creditMultiplier);
 
-    const exceedsCapacity = activeKeyCount > 0 && charCount > maxCapacity;
-    const exceeds10k = charCount > maxCapacity;
+    // ElevenLabs remaining balance is in credits: compare estCredits against maxCapacity
+    const exceedsCapacity = activeKeyCount > 0 && estCredits > maxCapacity;
+    const exceeds10k = estCredits > maxCapacity;
 
     const wordCount = text ? text.split(/\s+/).filter(Boolean).length : 0;
     const estDurationSec = wordCount > 0 ? Math.round(wordCount / 3.2) : 0;
@@ -468,11 +486,17 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
     const sentenceList = text.split(/(?<=[.!?\n])\s+/).filter(Boolean);
     const sentenceCount = sentenceList.length;
 
-    // Sliced chunks (each <= 2200 chars for ElevenLabs safe delivery)
-    const chunks = text ? splitScriptIntoChunks(text, CHUNK_SIZE) : [];
+    // Sliced chunks (each <= chunkTargetSize for ElevenLabs delivery)
+    const chunks = text ? splitScriptIntoChunks(text, chunkTargetSize) : [];
+
+    const hasAnyPaid = activeKeys.some((k) => k.quota?.tier && k.quota.tier !== 'free');
+    const isAllFree = activeKeyCount > 0 && !hasAnyPaid;
 
     return {
       charCount,
+      creditMultiplier,
+      estCredits,
+      effectiveCharCapacity,
       exceeds10k,
       exceedsCapacity,
       wordCount,
@@ -483,13 +507,15 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
       totalRemaining,
       totalLimit,
       maxCapacity,
-      duplicateAccountsCount
+      duplicateAccountsCount,
+      isAllFree,
+      hasAnyPaid
     };
-  }, [scriptText, keyPool]);
+  }, [scriptText, keyPool, chunkTargetSize, modelId]);
 
   // Trim to nearest sentence boundary before pool capacity limit
   const handleTrimTo10k = () => {
-    const limit = metrics.maxCapacity || 10000;
+    const limit = metrics.effectiveCharCapacity || 10000;
     if (scriptText.length <= limit) return;
     const sub = scriptText.slice(0, limit);
     const lastPunct = Math.max(
@@ -504,7 +530,7 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
     setScriptText(head);
     if (tail && navigator.clipboard) {
       navigator.clipboard.writeText(tail).catch(() => {});
-      alert(`Эхний ${head.length.toLocaleString()} тэмдэгтийг сонголоо. Үлдсэн ${tail.length.toLocaleString()} тэмдэгтийг Clipboard-д хуулсан тул дараагийн ээлжинд шууд Paste хийнэ үү.`);
+      alert(`Эхний ${head.length.toLocaleString()} тэмдэгтийг (~${Math.ceil(head.length * metrics.creditMultiplier).toLocaleString()} кредит) сонголоо. Үлдсэн ${tail.length.toLocaleString()} тэмдэгтийг Clipboard-д хуулсан тул дараагийн ээлжинд шууд Paste хийнэ үү.`);
     }
   };
 
@@ -543,12 +569,10 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
       unsub = window.api.onScriptStudioProgress?.((p: any) => {
         if (p?.message) setProgressMsg(p.message);
         if (p?.stage === 'tts' || p?.stage === 'pool-chunk-done' || p?.stage === 'pool-chunk-start') {
-          if (p.totalParts && p.partIndex !== undefined) {
-            const pct = Math.round(10 + ((p.partIndex) / p.totalParts) * 35);
-            setProgressPct(pct);
-          } else {
-            setProgressPct(25);
-          }
+          const total = p.totalParts || p.totalChunks || 1;
+          const current = p.partIndex !== undefined ? p.partIndex : (p.completedCount !== undefined ? p.completedCount : ((p.chunkIndex || 1) - 0.5));
+          const pct = Math.min(45, Math.max(10, Math.round(10 + (current / total) * 35)));
+          setProgressPct(pct);
         } else if (p?.stage === 'chunk-start' || p?.stage === 'chunk') {
           const totalChunks = p.totalChunks || 1;
           const chunkIdx = p.chunkIndex || 0;
@@ -571,7 +595,8 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
         mode: isVoiceOnly ? 'audio_only' : mode,
         audioOnly: isVoiceOnly,
         useVision: isVoiceOnly ? false : useVision,
-        panelPacing
+        panelPacing,
+        chunkSize: chunkTargetSize
       });
 
       if (!res.ok || !res.audioPath) {
@@ -713,10 +738,12 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
       unsub = window.api.onScriptStudioProgress?.((p: any) => {
         if (p?.message) setProgressMsg(p.message);
         if (p?.stage === 'tts' || p?.stage === 'pool-chunk-done' || p?.stage === 'pool-chunk-start') {
-          if (p.totalParts && p.partIndex !== undefined) {
-            const pct = Math.round(10 + ((p.partIndex) / p.totalParts) * 80);
-            setProgressPct(pct);
-          }
+          const total = p.totalParts || p.totalChunks || 1;
+          const current = p.partIndex !== undefined ? p.partIndex : (p.completedCount !== undefined ? p.completedCount : ((p.chunkIndex || 1) - 0.5));
+          const pct = Math.min(95, Math.max(10, Math.round(10 + (current / total) * 85)));
+          setProgressPct(pct);
+        } else if (p?.stage === 'done') {
+          setProgressPct(100);
         }
       });
 
@@ -847,7 +874,7 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
                     fontWeight: 600
                   }}
                 >
-                  {metrics.activeKeyCount > 0 ? `Багтаамж: ${metrics.maxCapacity.toLocaleString()} тэмдэгт` : 'Түлхүүр оруулна уу'}
+                  {metrics.activeKeyCount > 0 ? `Багтаамж: ${metrics.maxCapacity.toLocaleString()} кредит (~${metrics.effectiveCharCapacity.toLocaleString()} тэмдэгт)` : 'Түлхүүр оруулна уу'}
                 </span>
               </div>
               <span style={{ fontSize: 11, color: '#8e929d' }}>
@@ -878,7 +905,27 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
         {/* Modal Scrollable Body */}
         <div style={{ padding: '16px 20px', overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column', gap: 14 }}>
           <section style={{ padding: 12, border: '1px solid #52525b', borderRadius: 8 }}>
-            <strong>Тасарсан хоолойн хэсгүүдийг нэгтгэх</strong>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+              <strong>Тасарсан хоолойн хэсгүүдийг нэгтгэх</strong>
+              <button
+                type="button"
+                className="btn primary"
+                onClick={() => window.dispatchEvent(new CustomEvent('open-audio-merger'))}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  background: '#6366f1',
+                  color: '#fff',
+                  fontWeight: 600,
+                  fontSize: 12,
+                  padding: '5px 12px'
+                }}
+              >
+                <span>🎵</span>
+                <span>Хоёр аудио сонгож нэгтгэх</span>
+              </button>
+            </div>
             <div style={{ marginTop: 10 }}>
               <button className="btn" disabled={busy} onClick={() => handleFolderMerge()}>Хавтас сонгох — нэрээр нэгтгэх</button>
               {audioFolder && <div>
@@ -1286,19 +1333,66 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
                 {studioMode === 'voice_only' ? '🎙️ Монгол Скрипт / Дуу хоолойн текст:' : '🎬 Монгол Скрипт / Recap тайлбар текст:'}
               </label>
 
-              {/* Character Metrics Header Badges */}
-              <div style={{ display: 'flex', gap: 6, fontSize: 11, alignItems: 'center' }}>
+              {/* Character & Token/Credit Metrics Header Badges */}
+              <div style={{ display: 'flex', gap: 6, fontSize: 11, alignItems: 'center', flexWrap: 'wrap' }}>
                 <span
                   style={{
                     padding: '2px 8px',
                     borderRadius: 12,
-                    background: metrics.exceedsCapacity ? 'rgba(239, 68, 68, 0.25)' : 'rgba(255, 255, 255, 0.08)',
-                    color: metrics.exceedsCapacity ? '#f87171' : metrics.charCount > (metrics.maxCapacity * 0.8) ? '#fbbf24' : '#e4e4e7',
-                    fontWeight: 650,
-                    border: `1px solid ${metrics.exceedsCapacity ? '#ef4444' : 'rgba(255,255,255,0.1)'}`
+                    background: 'rgba(255, 255, 255, 0.08)',
+                    color: '#e4e4e7',
+                    fontWeight: 600,
+                    border: '1px solid rgba(255,255,255,0.1)'
                   }}
+                  title={`Текстийн нийт урт: ${metrics.charCount.toLocaleString()} тэмдэгт`}
                 >
-                  📝 {metrics.charCount.toLocaleString()} / {metrics.maxCapacity.toLocaleString()} тэмдэгт
+                  📝 {metrics.charCount.toLocaleString()} тэмдэгт
+                </span>
+
+                <span
+                  style={{
+                    padding: '2px 8px',
+                    borderRadius: 12,
+                    background: metrics.exceedsCapacity
+                      ? 'rgba(239, 68, 68, 0.25)'
+                      : metrics.estCredits > (metrics.maxCapacity * 0.8)
+                      ? 'rgba(245, 158, 11, 0.2)'
+                      : 'rgba(59, 130, 246, 0.18)',
+                    color: metrics.exceedsCapacity
+                      ? '#f87171'
+                      : metrics.estCredits > (metrics.maxCapacity * 0.8)
+                      ? '#fbbf24'
+                      : '#93c5fd',
+                    fontWeight: 650,
+                    border: `1px solid ${
+                      metrics.exceedsCapacity
+                        ? '#ef4444'
+                        : metrics.estCredits > (metrics.maxCapacity * 0.8)
+                        ? 'rgba(245, 158, 11, 0.4)'
+                        : 'rgba(59, 130, 246, 0.3)'
+                    }`
+                  }}
+                  title={`ElevenLabs тариф: 1 тэмдэгт = ${metrics.creditMultiplier} кредит. Тооцоолсон зарцуулалт: ~${metrics.estCredits.toLocaleString()} кредит.`}
+                >
+                  🪙 ~{metrics.estCredits.toLocaleString()} / {metrics.maxCapacity.toLocaleString()} кредит
+                </span>
+
+                <span
+                  style={{
+                    padding: '2px 8px',
+                    borderRadius: 12,
+                    background: metrics.creditMultiplier < 1 ? 'rgba(16, 185, 129, 0.2)' : 'rgba(255, 255, 255, 0.06)',
+                    color: metrics.creditMultiplier < 1 ? '#34d399' : '#a1a1aa',
+                    border: `1px solid ${metrics.creditMultiplier < 1 ? 'rgba(16, 185, 129, 0.4)' : 'rgba(255,255,255,0.08)'}`,
+                    fontWeight: 600
+                  }}
+                  title={
+                    metrics.creditMultiplier < 1
+                      ? 'ElevenLabs хөнгөлөлттэй тариф: Энэ модель 1 тэмдэгтэд ердөө 0.5 кредит зарцуулдаг тул 50% бага токен/кредит үрнэ.'
+                      : 'ElevenLabs стандарт тариф: 1 тэмдэгт = 1 кредит'
+                  }
+                >
+                  {metrics.creditMultiplier < 1 ? '⚡ 0.5× тариф (-50%)' : '💎 1.0× стандарт'}
                 </span>
 
                 <span
@@ -1311,7 +1405,7 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
                   }}
                   title="Хэсэг бүрийг Multi-Key Pool ашиглан зэрэгцүүлэн боловсруулна"
                 >
-                  ✂️ {metrics.chunks.length > 0 ? `${metrics.chunks.length} хэсэгт зэрэг хуваарилагдана` : '1 хэсэг'}
+                  ✂️ {metrics.chunks.length > 0 ? `${metrics.chunks.length} хэсэг` : '1 хэсэг'}
                 </span>
 
                 {studioMode === 'sync_video' && (
@@ -1705,28 +1799,109 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
               />
             </div>
 
-            {/* Chunks breakdown badges (Showing user how it's sliced) */}
+            {/* Chunks breakdown & Smart Chunking Selector */}
             {metrics.chunks.length > 0 && (
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', marginTop: 2, fontSize: 11, color: '#a1a1aa' }}>
-                <span style={{ fontWeight: 600, color: '#e4e4e7' }}>
-                  ✂️ Түлхүүрүүд рүү зэрэгцүүлэн илгээх {metrics.chunks.length} хэсэг (тус бүр ≤ {CHUNK_SIZE.toLocaleString()} тэмдэгт):
-                </span>
-                {metrics.chunks.map((ch, idx) => (
-                  <span
-                    key={idx}
-                    style={{
-                      padding: '2px 7px',
-                      borderRadius: 4,
-                      background: 'rgba(99, 102, 241, 0.15)',
-                      border: '1px solid rgba(99, 102, 241, 0.3)',
-                      color: '#c7d2fe',
-                      fontSize: 10,
-                      fontWeight: 500
-                    }}
-                  >
-                    Хэсэг {idx + 1}: {ch.length.toLocaleString()} тэмдэгт
-                  </span>
-                ))}
+              <div
+                style={{
+                  marginTop: 6,
+                  padding: '8px 10px',
+                  borderRadius: 6,
+                  background: 'rgba(255, 255, 255, 0.03)',
+                  border: '1px solid rgba(255, 255, 255, 0.07)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 8
+                }}
+              >
+                {/* Header row: Count & Selector */}
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    flexWrap: 'wrap',
+                    gap: 8,
+                    fontSize: 11
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ fontWeight: 650, color: '#e4e4e7' }}>
+                      ✂️ Түлхүүрүүд рүү илгээх: <span style={{ color: '#818cf8' }}>{metrics.chunks.length} хэсэг</span>
+                    </span>
+                    <span style={{ color: '#71717a' }}>•</span>
+                    <span style={{ color: '#a1a1aa' }}>
+                      Дунджаар ~{Math.round(metrics.charCount / Math.max(1, metrics.chunks.length)).toLocaleString()} тэмдэгт/хэсэг
+                    </span>
+                  </div>
+
+                  {/* Chunk size picker pills */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+                    <span style={{ color: '#71717a', fontSize: 10, marginRight: 2 }}>Хуваах хэмжээ:</span>
+                    {CHUNK_SIZE_OPTIONS.map((opt) => {
+                      const isSel = chunkTargetSize === opt.value;
+                      return (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          onClick={() => setChunkTargetSize(opt.value)}
+                          title={opt.desc}
+                          style={{
+                            padding: '3px 8px',
+                            borderRadius: 4,
+                            border: isSel ? '1px solid #6366f1' : '1px solid rgba(255,255,255,0.1)',
+                            background: isSel ? 'rgba(99, 102, 241, 0.25)' : 'rgba(255,255,255,0.04)',
+                            color: isSel ? '#c7d2fe' : '#a1a1aa',
+                            fontSize: 10,
+                            fontWeight: isSel ? 650 : 500,
+                            cursor: 'pointer',
+                            transition: 'all 0.15s ease'
+                          }}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {metrics.isAllFree && chunkTargetSize > 2500 && (
+                  <div style={{ fontSize: 10, color: '#f59e0b', background: 'rgba(245, 158, 11, 0.1)', border: '1px solid rgba(245, 158, 11, 0.25)', borderRadius: 4, padding: '4px 8px', display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span>💡</span>
+                    <span><strong>Мэдээлэл:</strong> Таны бүх түлхүүр <strong>Free эрхтэй</strong> тул ElevenLabs нэг хүсэлтэд дээд тал нь 2,500 тэмдэгт зөвшөөрдөг. Систем түлхүүрийн Free лимитэд тааруулан автоматаар 2,450 тэмдэгтээр аюулгүй хувааж уншуулна.</span>
+                  </div>
+                )}
+
+                {/* Badges container with maxHeight and smooth scroll */}
+                <div
+                  style={{
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    gap: 6,
+                    maxHeight: 110,
+                    overflowY: 'auto',
+                    padding: '4px 2px'
+                  }}
+                >
+                  {metrics.chunks.map((ch, idx) => (
+                    <span
+                      key={idx}
+                      style={{
+                        padding: '2px 8px',
+                        borderRadius: 4,
+                        background: 'rgba(99, 102, 241, 0.15)',
+                        border: '1px solid rgba(99, 102, 241, 0.3)',
+                        color: '#c7d2fe',
+                        fontSize: 10,
+                        fontWeight: 500,
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 4
+                      }}
+                    >
+                      <strong style={{ color: '#fff' }}>Хэсэг {idx + 1}:</strong> {ch.length.toLocaleString()} тэмдэгт
+                    </span>
+                  ))}
+                </div>
               </div>
             )}
 
@@ -1746,7 +1921,7 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
                 }}
               >
                 <div style={{ fontSize: 11, color: '#fca5a5', lineHeight: 1.45 }}>
-                  <strong>⚠️ Үлдэгдэл хүрэлцэхгүй байж болзошгүй:</strong> Скрипт {metrics.charCount.toLocaleString()} тэмдэгттэй. Ижил текст, хоолой, тохиргооны хадгалсан хэсгүүдийг дахин ашиглана. Зөвхөн дутуу хэсгүүдэд кредит зарцуулна; түлхүүр тус бүрийн үлдэгдэл хүрэхгүй бол ажил зогсоно.
+                  <strong>⚠️ Кредит хүрэлцэхгүй байж болзошгүй:</strong> Скрипт {metrics.charCount.toLocaleString()} тэмдэгттэй (~{metrics.estCredits.toLocaleString()} кредит шаардлагатай), харин нийт багтаамж {metrics.maxCapacity.toLocaleString()} кредит байна. Ижил текст, хоолойн кэшлэгдсэн хэсгүүдэд 0 кредит зарцуулагдах ч шинэ хэсгүүдийн түлхүүрийн үлдэгдэл хүрэхгүй бол ажил зогсоно.
                 </div>
                 <button
                   type="button"
@@ -1801,24 +1976,46 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
                   fontSize: 12
                 }}
               >
-                <option value="eleven_v4">🌟 Eleven v4 (СҮҮЛИЙН ҮЕИЙН · 90+ хэл, дээд зэргийн жүжиглэлт, аудио таг)</option>
-                <option value="eleven_v4_turbo">⚡ Eleven v4 Turbo (Хэт хурдан 100ms · v4 жүжиглэлт)</option>
-                <option value="eleven_v3">✨ Eleven v3 (Санал болгох · 70+ хэл, амьд сэтгэл хөдлөл, жүжиглэлт)</option>
-                <option value="eleven_multilingual_v2">🎙️ Multilingual v2 (Баталгаат хувилбар)</option>
-                <option value="eleven_flash_v2_5">Flash v2.5 (Хурдан хувилбар)</option>
-                <option value="eleven_turbo_v2_5">Turbo v2.5 (Хямд тариф)</option>
+                <option value="eleven_v4">🌟 Eleven v4 (СҮҮЛИЙН ҮЕИЙН · 90+ хэл, аудио таг) · 1.0× кредит</option>
+                <option value="eleven_v4_turbo">⚡ Eleven v4 Turbo (Хэт хурдан 100ms · 50% хэмнэлттэй) · 0.5× кредит</option>
+                <option value="eleven_v3">✨ Eleven v3 (Санал болгох · 70+ хэл, жүжиглэлт) · 1.0× кредит</option>
+                <option value="eleven_multilingual_v2">🎙️ Multilingual v2 (Баталгаат хувилбар) · 1.0× кредит</option>
+                <option value="eleven_flash_v2_5">⚡ Flash v2.5 (Хэт хурдан 75ms · 50% хэмнэлттэй) · 0.5× кредит</option>
+                <option value="eleven_turbo_v2_5">⚡ Turbo v2.5 (Хямд тариф · 50% хэмнэлттэй) · 0.5× кредит</option>
               </select>
               <span style={{ fontSize: 10, color: '#71717a' }}>
                 {modelId === 'eleven_v4'
-                  ? '✓ Eleven v4 нь дуу хоолойн дээд зэргийн жүжиглэлттэй, аудио таг ([whispers], [laughs], [sighs] г.м) болон 90+ хэл дэмжинэ.'
+                  ? '✓ Eleven v4: 1 тэмдэгт = 1.0 кредит. Аудио таг ([whispers], [laughs] г.м), 90+ хэл, дээд зэргийн жүжиглэлттэй.'
                   : modelId === 'eleven_v4_turbo'
-                  ? '✓ Eleven v4 Turbo нь хамгийн бага хоцролттойгоор (100ms) v4 түвшний яриа үүсгэнэ.'
+                  ? '✓ Eleven v4 Turbo: 1 тэмдэгт = 0.5 кредит (50% бага токен зарцуулна). Хэт хурдан 100ms, v4 жүжиглэлттэй.'
                   : modelId === 'eleven_v3'
-                  ? '✓ Eleven v3 нь өгүүлбэрийн утгыг шууд мэдэрч жүжиглэлттэй, амьд ярина (Зэрэгцээ Parallel боловсруулалттай).'
+                  ? '✓ Eleven v3: 1 тэмдэгт = 1.0 кредит. Өгүүлбэрийн утгыг шууд мэдэрч жүжиглэлттэй, амьд ярина.'
                   : modelId === 'eleven_multilingual_v2'
-                  ? '✓ Multilingual v2 нь туршигдсан баталгаат чанартай.'
-                  : 'Хурдан хувилбар.'}
+                  ? '✓ Multilingual v2: 1 тэмдэгт = 1.0 кредит. Туршигдсан баталгаат чанартай.'
+                  : '✓ Хямд тариф: 1 тэмдэгт = 0.5 кредит (50% хэмнэлттэй).'}
               </span>
+              {metrics.charCount > 0 && (
+                <div
+                  style={{
+                    fontSize: 10.5,
+                    padding: '4px 8px',
+                    borderRadius: 4,
+                    background: metrics.creditMultiplier < 1 ? 'rgba(16, 185, 129, 0.1)' : 'rgba(59, 130, 246, 0.1)',
+                    border: `1px solid ${metrics.creditMultiplier < 1 ? 'rgba(16, 185, 129, 0.25)' : 'rgba(59, 130, 246, 0.2)'}`,
+                    color: metrics.creditMultiplier < 1 ? '#34d399' : '#93c5fd',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center'
+                  }}
+                >
+                  <span>
+                    💡 Бодит тооцоолол: <strong>{metrics.charCount.toLocaleString()}</strong> тэмдэгт × <strong>{metrics.creditMultiplier}x</strong>
+                  </span>
+                  <strong>
+                    = ~{metrics.estCredits.toLocaleString()} кредит
+                  </strong>
+                </div>
+              )}
             </div>
 
             {/* Voice Selector */}
@@ -2228,7 +2425,7 @@ export default function ScriptStudioModal({ isOpen, onClose, onSuccessNotice }: 
           }}
         >
           <div style={{ fontSize: 11, color: '#71717a' }}>
-            ⚡ {metrics.maxCapacity.toLocaleString()} тэмдэгт хүртэл (нэг дор хамгийн ихдээ {Math.min(metrics.activeKeyCount || 1, 6)} хэсэг)
+            ⚡ Нийт багтаамж: {metrics.maxCapacity.toLocaleString()} кредит (~{metrics.effectiveCharCapacity.toLocaleString()} тэмдэгт боломжтой · {Math.min(metrics.activeKeyCount || 1, 6)} түлхүүр зэрэг)
           </div>
           <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
             <button

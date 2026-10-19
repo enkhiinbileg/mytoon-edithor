@@ -136,23 +136,18 @@ function matchScript(sentences, recognized, duration, actualWords = []) {
       }
     }
 
+    if (cursor >= totalTokens || bestScore < 0.35) {
+      throw new Error(`Өгүүлбэр ${index + 1} аудиотой таарсангүй: "${text}"`);
+    }
+
     let start = tokens[bestStart].start;
     let end = tokens[bestEnd].end;
-
-    // Safety fallback: anchor to actual spoken audio tokens at cursor rather than guessing artificial durations
-    if (bestScore < 0.35) {
-      const fallbackEndIdx = Math.min(totalTokens - 1, cursor + expectedLen - 1);
-      start = tokens[cursor]?.start ?? (result.length > 0 ? result[result.length - 1].end : 0);
-      end = tokens[fallbackEndIdx]?.end ?? (start + Math.max(0.4, expectedLen * 0.3));
-      cursor = Math.min(totalTokens - 1, fallbackEndIdx + 1);
-    } else {
-      cursor = Math.min(totalTokens - 1, bestEnd + 1);
-    }
+    cursor = bestEnd + 1;
 
     if (result.length > 0) {
       const prev = result[result.length - 1];
-      if (start < prev.end + 0.02) {
-        start = Math.round((prev.end + 0.03) * 1000) / 1000;
+      if (start < prev.end) {
+        start = Math.round(prev.end * 1000) / 1000;
       }
     }
     if (end <= start) {

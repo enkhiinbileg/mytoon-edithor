@@ -129,32 +129,37 @@ export default function TextPanel() {
       return;
     }
 
-    const result = alignScriptToClips(text, captionClips, {
-      mode: scriptFixMode,
-      selectedClipId: selectedClipId || undefined
-    });
-    const fixedMap = new Map(result.updatedClips.map(c => [c.id, c.style?.text || '']));
+    try {
+      const result = alignScriptToClips(text, captionClips, {
+        mode: scriptFixMode,
+        selectedClipId: selectedClipId || undefined
+      });
+      const fixedMap = new Map(result.updatedClips.map(c => [c.id, c.style?.text || '']));
 
-    useEditor.setState(s => ({
-      clips: s.clips.map(c => {
-        if (fixedMap.has(c.id) && c.style) {
-          return {
-            ...c,
-            style: { ...c.style, text: fixedMap.get(c.id)! }
-          };
-        }
-        return c;
-      })
-    }));
+      useEditor.setState(s => ({
+        clips: s.clips.map(c => {
+          if (fixedMap.has(c.id) && c.style) {
+            return {
+              ...c,
+              asrText: (c as any).asrText || c.style.text || '',
+              style: { ...c.style, text: fixedMap.get(c.id)! }
+            } as Clip;
+          }
+          return c;
+        })
+      }));
 
-    const updated = useEditor.getState();
-    if (updated.currentProjectId) {
-      await window.api.autosaveProjectById(updated.currentProjectId, updated.snapshotProject(), { duration: updated.duration() });
+      const updated = useEditor.getState();
+      if (updated.currentProjectId) {
+        await window.api.autosaveProjectById(updated.currentProjectId, updated.snapshotProject(), { duration: updated.duration() });
+      }
+
+      setShowScriptFixModal(false);
+      setFixToast(`✅ ${result.message}`);
+      setTimeout(() => setFixToast(''), 5000);
+    } catch (err: any) {
+      alert('Скриптээр засахад алдаа гарлаа: ' + (err.message || String(err)));
     }
-
-    setShowScriptFixModal(false);
-    setFixToast(`✅ ${result.message}`);
-    setTimeout(() => setFixToast(''), 5000);
   };
 
   const handleReflowSentenceBoundaries = async () => {
@@ -334,6 +339,16 @@ export default function TextPanel() {
       toggleTrackFlag('v1', 'locked');
     }
 
+    // Clean any empty caption clips before auto-cut so they don't break timeline validation
+    const emptyCaps = useEditor.getState().clips.filter((c) => c.kind === 'text' && !c.style?.text?.trim());
+    if (emptyCaps.length > 0) {
+      const emptyIds = new Set(emptyCaps.map((c) => c.id));
+      useEditor.setState((s) => ({
+        clips: s.clips.filter((c) => !emptyIds.has(c.id))
+      }));
+      await flushDraft();
+    }
+
     autoCutBusy.current = true;
     setAutoCutting(true);
     setAutoCutStatus('🔍 Англи SRT файлыг задалж байна...');
@@ -342,6 +357,9 @@ export default function TextPanel() {
     setAutoCutError('');
     let unsub: (() => void) | undefined;
     const original = useEditor.getState();
+    const validCaptions = original.clips
+      .filter((c) => c.kind === 'text' && c.style?.text?.trim())
+      .sort((a, b) => a.start - b.start);
     const projectDoc = original.snapshotProject();
     const fingerprint = JSON.stringify(projectDoc);
     const requestId = crypto.randomUUID();
@@ -354,13 +372,13 @@ export default function TextPanel() {
 
       const res = await window.api.autoCutBySrt({
         srtPath,
-        captions: captionClips,
+        captions: validCaptions,
         projectData: projectDoc,
         requestId
       });
 
       if (!res.ok) throw new Error(res.error || 'Дүрс тайралт амжилтгүй боллоо.');
-      if (!res.videoClips.length || !res.report || (res.report.coveredCaptionCount ?? res.report.matchedCaptionCount) !== captionClips.length || Math.abs(res.report.durationError) > 0.000001) throw new Error('Тааруулалтын эцсийн шалгалт амжилтгүй.');
+      if (!res.videoClips.length || !res.report || (res.report.coveredCaptionCount ?? res.report.matchedCaptionCount) !== validCaptions.length || Math.abs(res.report.durationError) > 0.000001) throw new Error('Тааруулалтын эцсийн шалгалт амжилтгүй.');
       const current = useEditor.getState();
       if (!mounted.current) return;
       if (current.currentProjectId !== original.currentProjectId || current.projectPath !== original.projectPath || JSON.stringify(current.snapshotProject()) !== fingerprint) throw new Error('Тааруулалтын явцад төсөл өөрчлөгдсөн. Шинэ timeline дээр дахин ажиллуулна уу.');

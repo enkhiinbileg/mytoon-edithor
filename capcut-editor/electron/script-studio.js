@@ -10,10 +10,10 @@ const settings = require('./settings');
 const pool = require('./elevenlabs-pool');
 
 /**
- * Intelligently splits a long script into chunks of <= maxChars (e.g. 2800 characters)
+ * Intelligently splits a long script into chunks of <= maxChars (e.g. 9000 characters)
  * keeping complete sentences, clauses and natural pauses.
  */
-function splitScriptIntoChunks(text, maxChars = 2500) {
+function splitScriptIntoChunks(text, maxChars = 9000) {
   const trimmed = (text || '').trim();
   if (!trimmed) return [];
   if (trimmed.length <= maxChars) return [trimmed];
@@ -94,7 +94,8 @@ async function buildScriptRecap(spec, progress) {
     mode = 'hybrid', // 'hybrid' (Хөдөлгөөнтэй үед Cut + дуу үргэлжлэхэд Freeze) | 'freeze' | 'cut' | 'audio_only'
     audioOnly = false,
     useVision = false, // Rule 1: false by default
-    panelPacing = 'auto'
+    panelPacing = 'auto',
+    chunkSize = 9000
   } = spec;
 
   const isAudioOnly = Boolean(audioOnly || mode === 'audio_only' || !videoPath);
@@ -133,9 +134,19 @@ async function buildScriptRecap(spec, progress) {
     }
   }
 
-  // 1. Synthesize audio via ElevenLabs Multi-Key Dispatcher in safe chunks (<= 1000 chars per API call)
-  const scriptChunks = splitScriptIntoChunks(cleanScript, 1000);
-  const audioDir = path.join(app.getPath('userData'), 'script-studio-audio');
+function getDownloadsDir() {
+  try {
+    const electron = require('electron');
+    if (electron.app?.getPath) return electron.app.getPath('downloads');
+  } catch {}
+  return path.join(os.homedir(), 'Downloads');
+}
+
+  // 1. Synthesize audio via ElevenLabs Multi-Key Dispatcher in smart adaptive chunks (default 9000 chars, max 10000)
+  const targetChunkSize = Math.max(500, Math.min(10000, Number(chunkSize) || 9000));
+  const scriptChunks = splitScriptIntoChunks(cleanScript, targetChunkSize);
+  const downloadsDir = getDownloadsDir();
+  const audioDir = path.join(downloadsDir, 'Cutline Audio');
   fs.mkdirSync(audioDir, { recursive: true });
   const audioFile = path.join(audioDir, `voice_master_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.mp3`);
 
@@ -190,6 +201,12 @@ async function buildScriptRecap(spec, progress) {
     progress?.({ stage: 'tts', message: `🎙️ ElevenLabs: Нийт ${scriptChunks.length} хэсгийн дууг нэгтгэж байна...` });
   }
   await ff.concatAudioFiles(partFiles, audioFile);
+
+  // Also make master audio instantly accessible directly in Downloads folder
+  try {
+    const directDl = path.join(downloadsDir, path.basename(audioFile));
+    fs.copyFileSync(audioFile, directDl);
+  } catch {}
 
   const audioProbe = await ff.probe(audioFile);
   const voiceDuration = audioProbe.duration || cumulativeTimeOffset;

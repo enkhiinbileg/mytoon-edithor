@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, dialog, protocol, shell, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, protocol, shell, screen, nativeImage } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
@@ -25,9 +25,59 @@ const MIME = {
 };
 const mimeFor = (p) => MIME[path.extname(p).toLowerCase()] || 'application/octet-stream';
 
+app.setName('Cutline');
+if (process.platform === 'win32') {
+  app.setAppUserModelId('Cutline.VideoEditor');
+}
+
 const isDev = process.argv.includes('--dev');
 // An isolated profile keeps integration tests away from the editor's real drafts and keys.
 if (process.env.CUTLINE_TEST_DIR) app.setPath('userData', process.env.CUTLINE_TEST_DIR);
+
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (win) {
+      if (win.isMinimized()) win.restore();
+      win.focus();
+    }
+  });
+}
+
+// Mirror main-process console output into userData/logs/main.log for diagnosing hangs.
+(() => {
+  let logFile = null;
+  const target = () => {
+    if (logFile) return logFile;
+    try {
+      const dir = path.join(app.getPath('userData'), 'logs');
+      fs.mkdirSync(dir, { recursive: true });
+      logFile = path.join(dir, 'main.log');
+    } catch { return null; }
+    return logFile;
+  };
+  for (const level of ['log', 'warn', 'error']) {
+    const orig = console[level].bind(console);
+    console[level] = (...args) => {
+      orig(...args);
+      try {
+        const f = target();
+        if (!f) return;
+        const line = args.map(a => (a instanceof Error ? (a.stack || a.message) : typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
+        fs.appendFileSync(f, `[${new Date().toISOString()}] [${level}] ${line}\n`);
+      } catch {}
+    };
+  }
+})();
+
+process.on('uncaughtException', (err) => {
+  console.error('[UNCAUGHT EXCEPTION]', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[UNHANDLED REJECTION]', reason);
+});
 
 // Safe hardware-accelerated rendering without crashing Windows GPU compositor
 app.commandLine.appendSwitch('enable-gpu-rasterization');
@@ -48,8 +98,18 @@ function createWindow() {
   // Never open larger than the display: the editor lays out in four columns and
   // the right-hand inspector ends up off-screen if the window overflows.
   const { width: awW, height: awH } = screen.getPrimaryDisplay().workAreaSize;
+  const iconPath = [
+    path.join(__dirname, 'icon.ico'),
+    path.join(__dirname, '..', 'icon.ico'),
+    path.join(__dirname, '..', 'dist', 'icon.ico'),
+    path.join(__dirname, '..', 'public', 'icon.ico'),
+    path.join(__dirname, 'logo.png')
+  ].find((p) => fs.existsSync(p));
+
+  const iconImg = iconPath ? nativeImage.createFromPath(iconPath) : null;
 
   win = new BrowserWindow({
+    title: 'Cutline — Video Editor',
     width: Math.min(1600, awW),
     height: Math.min(950, awH),
     minWidth: 960,
@@ -57,12 +117,19 @@ function createWindow() {
     show: true,
     frame: false,                 // custom CapCut-style title bar
     backgroundColor: '#111114',
+    ...(iconImg && !iconImg.isEmpty() ? { icon: iconImg } : (iconPath ? { icon: iconPath } : {})),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false
     }
   });
+
+  if (iconImg && !iconImg.isEmpty()) {
+    try { win.setIcon(iconImg); } catch {}
+  } else if (iconPath) {
+    try { win.setIcon(iconPath); } catch {}
+  }
 
   win.show();
   win.focus();
@@ -650,12 +717,99 @@ ipcMain.handle('dialog:openAudioFile', async () => {
   const filePath = res.filePaths[0];
   try {
     const probeInfo = await ff.probe(filePath);
+    const stat = await fs.promises.stat(filePath);
     return {
       ok: true,
       path: filePath,
       name: path.basename(filePath),
       duration: probeInfo.duration || 0,
-      hasAudio: probeInfo.hasAudio
+      hasAudio: probeInfo.hasAudio,
+      size: stat.size
+    };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('dialog:openMultipleAudioFiles', async () => {
+  const res = await dialog.showOpenDialog(win, {
+    title: 'Аудио файлууд сонгох (Ctrl/Shift дарж олноор сонгож болно)',
+    filters: [
+      { name: 'Audio Files (*.mp3, *.wav, *.m4a, *.aac, *.flac, *.ogg)', extensions: ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg'] },
+      { name: 'All Files (*.*)', extensions: ['*'] }
+    ],
+    properties: ['openFile', 'multiSelections']
+  });
+  if (res.canceled || !res.filePaths?.length) return [];
+  const results = [];
+  for (const filePath of res.filePaths) {
+    try {
+      const probeInfo = await ff.probe(filePath);
+      const stat = await fs.promises.stat(filePath);
+      results.push({
+        ok: true,
+        path: filePath,
+        name: path.basename(filePath),
+        duration: probeInfo.duration || 0,
+        hasAudio: probeInfo.hasAudio,
+        size: stat.size
+      });
+    } catch (err) {
+      results.push({ ok: false, path: filePath, name: path.basename(filePath), error: err.message });
+    }
+  }
+  return results;
+});
+
+ipcMain.handle('dialog:saveAudioFile', async (_e, defaultName) => {
+  const res = await dialog.showSaveDialog(win, {
+    title: 'Нэгтгэсэн аудиог хадгалах байршил',
+    defaultPath: path.join(app.getPath('downloads'), defaultName || `merged_voice_${Date.now()}.mp3`),
+    filters: [
+      { name: 'MP3 Audio (*.mp3)', extensions: ['mp3'] },
+      { name: 'All Files (*.*)', extensions: ['*'] }
+    ]
+  });
+  if (res.canceled || !res.filePath) return null;
+  return res.filePath;
+});
+
+ipcMain.handle('audio:mergeFiles', async (_e, { filePaths, outputPath }) => {
+  if (!Array.isArray(filePaths) || filePaths.length < 2) {
+    return { ok: false, error: 'Нэгтгэхийн тулд дор хаяж 2 аудио файл сонгоно уу.' };
+  }
+  for (const fp of filePaths) {
+    if (!fs.existsSync(fp)) {
+      return { ok: false, error: `Файл олдсонгүй: ${path.basename(fp)}` };
+    }
+  }
+  const defaultDir = app.getPath('downloads');
+  const targetOut = outputPath || path.join(defaultDir, `merged_voice_${Date.now()}.mp3`);
+  
+  try {
+    let totalEstDuration = 0;
+    const filesInfo = [];
+    for (const fp of filePaths) {
+      const probe = await ff.probe(fp);
+      if (!probe.hasAudio) {
+        return { ok: false, error: `Аудио биш эсвэл гэмтсэн файл байна: ${path.basename(fp)}` };
+      }
+      totalEstDuration += probe.duration || 0;
+      filesInfo.push({ path: fp, name: path.basename(fp), duration: probe.duration || 0 });
+    }
+
+    await ff.concatAudioFiles(filePaths, targetOut);
+    
+    const outProbe = await ff.probe(targetOut);
+    const stat = await fs.promises.stat(targetOut);
+    return {
+      ok: true,
+      outputPath: targetOut,
+      name: path.basename(targetOut),
+      duration: outProbe.duration || totalEstDuration,
+      size: stat.size,
+      filesCount: filePaths.length,
+      filesInfo
     };
   } catch (err) {
     return { ok: false, error: err.message };
@@ -796,24 +950,59 @@ ipcMain.handle('eleven:refreshQuotas', async () => {
   }
 });
 
+const activeScriptJobs = new Set();
 ipcMain.handle('script:buildRecap', async (_e, spec) => {
+  const sender = _e.sender;
+  const startedAt = Date.now();
+  console.log('[script:buildRecap] start', { chars: String(spec?.scriptText || '').length, model: spec?.modelId, chunkSize: spec?.chunkSize, audioOnly: !!spec?.audioOnly });
+  const sendProgress = (p) => {
+    if (p?.message) console.log('[script:progress]', p.message);
+    try {
+      if (sender && !sender.isDestroyed()) sender.send('script:progress', p);
+    } catch {}
+  };
+  // A heartbeat keeps the event loop + this closure alive for the whole job.
+  const heartbeat = setInterval(() => {
+    console.log(`[script:buildRecap] still running ${Math.round((Date.now() - startedAt) / 1000)}s`);
+  }, 30000);
+  const job = (async () => {
+    try {
+      const res = await scriptStudio.buildScriptRecap(spec, sendProgress);
+      console.log('[script:buildRecap] done', { ok: res?.ok, audioPath: res?.audioPath, secs: Math.round((Date.now() - startedAt) / 1000) });
+      return res;
+    } catch (err) {
+      console.error('[script:buildRecap error]', err);
+      return { ok: false, error: String(err?.message || err) };
+    }
+  })();
+  activeScriptJobs.add(job);
   try {
-    return await scriptStudio.buildScriptRecap(spec, (p) => win?.webContents.send('script:progress', p));
-  } catch (err) {
-    return { ok: false, error: String(err.message || err) };
+    return await job;
+  } finally {
+    clearInterval(heartbeat);
+    activeScriptJobs.delete(job);
   }
 });
 
+function getScriptAudioRecoveryDir() {
+  const dl = path.join(app.getPath('downloads'), 'Cutline Audio');
+  if (fs.existsSync(dl)) return dl;
+  const ud = path.join(app.getPath('userData'), 'script-studio-audio');
+  if (fs.existsSync(ud)) return ud;
+  fs.mkdirSync(dl, { recursive: true });
+  return dl;
+}
+
 ipcMain.handle('script:scanRecovery', async () => {
   try {
-    return { ok: true, ...await require('./voice-recovery').scanLatestParts(path.join(app.getPath('userData'), 'script-studio-audio')) };
+    return { ok: true, ...await require('./voice-recovery').scanLatestParts(getScriptAudioRecoveryDir()) };
   } catch (error) { return { ok: false, error: error.message }; }
 });
 let recoveringVoice = false;
 let selectedAudioFolder = null;
 ipcMain.handle('script:pickAudioFolder', async () => {
   try {
-    const picked = await dialog.showOpenDialog(win, { title: 'Нэгтгэх аудионы хавтас', properties: ['openDirectory'] });
+    const picked = await dialog.showOpenDialog(win, { title: 'Нэгтгэх аудионы хавтас', defaultPath: path.join(app.getPath('downloads'), 'Cutline Audio'), properties: ['openDirectory'] });
     if (picked.canceled) return { ok: true, canceled: true };
     selectedAudioFolder = await require('./voice-recovery').scanAudioFolder(picked.filePaths[0]);
     return { ok: true, ...selectedAudioFolder };
@@ -825,7 +1014,8 @@ ipcMain.handle('script:mergeAudioFolder', async (_e, token) => {
   try {
     const scan = selectedAudioFolder;
     if (!scan || scan.token !== token) throw new Error('Хавтсаа дахин сонгоно уу.');
-    const saved = await dialog.showSaveDialog(win, { title: 'Нэгтгэсэн аудио хадгалах', defaultPath: 'merged-audio.mp3', filters: [{ name: 'MP3', extensions: ['mp3'] }] });
+    const defaultOut = path.join(app.getPath('downloads'), `merged-audio-${Date.now()}.mp3`);
+    const saved = await dialog.showSaveDialog(win, { title: 'Нэгтгэсэн аудио хадгалах', defaultPath: defaultOut, filters: [{ name: 'MP3', extensions: ['mp3'] }] });
     if (saved.canceled || !saved.filePath) return { ok: true, canceled: true };
     return { ok: true, ...await require('./voice-recovery').mergeAudioFolder({ dir: scan.dir, token, output: saved.filePath }, ff) };
   } catch (error) { return { ok: false, error: error.message }; }
@@ -835,8 +1025,12 @@ ipcMain.handle('script:mergeRecovery', async (_e, spec) => {
   if (recoveringVoice) return { ok: false, error: 'Аудио нэгтгэж байна. Түр хүлээнэ үү.' };
   recoveringVoice = true;
   try {
+    const rDir = getScriptAudioRecoveryDir();
     const result = await require('./voice-recovery').mergeLatestParts({
-      dir: path.join(app.getPath('userData'), 'script-studio-audio'), token: spec?.token, allowGaps: spec?.allowGaps === true
+      dir: rDir,
+      outDir: app.getPath('downloads'),
+      token: spec?.token,
+      allowGaps: spec?.allowGaps === true
     }, ff);
     return { ok: true, ...result };
   } catch (error) { return { ok: false, error: error.message }; }

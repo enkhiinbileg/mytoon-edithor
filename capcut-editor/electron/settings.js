@@ -83,6 +83,24 @@ function getGroqFileKey() {
   return '';
 }
 
+function getGeminiFileKey() {
+  if (process.env.GEMINI_API_KEY) return process.env.GEMINI_API_KEY;
+  const candidates = [
+    path.join(__dirname, '..', 'gemini_key.txt'),
+    path.join(__dirname, 'gemini_key.txt'),
+    path.join(app?.getPath ? app.getPath('userData') : '', 'gemini_key.txt')
+  ];
+  for (const c of candidates) {
+    if (c && fs.existsSync(c)) {
+      try {
+        const k = fs.readFileSync(c, 'utf8').trim();
+        if (k) return k;
+      } catch {}
+    }
+  }
+  return '';
+}
+
 /** Values safe to hand to the renderer: secrets collapse to a boolean. */
 function readPublic() {
   const s = read();
@@ -93,6 +111,9 @@ function readPublic() {
   for (const k of SECRET_KEYS) if (!(k in out)) out[k] = false;
   if (!out.groqApiKey && Boolean(getGroqFileKey())) {
     out.groqApiKey = true;
+  }
+  if (!out.geminiApiKey && Boolean(getGeminiFileKey())) {
+    out.geminiApiKey = true;
   }
   out.elevenLabsKeyPool = getKeyPoolPublic();
   return out;
@@ -251,7 +272,7 @@ function secret(name) {
     return getGroqFileKey();
   }
   if (!dec && name === 'geminiApiKey') {
-    return process.env.GEMINI_API_KEY || '';
+    return getGeminiFileKey();
   }
   return dec;
 }

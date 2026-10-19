@@ -98,12 +98,13 @@ button {
 }
 
 .logo-mark {
-  width: 22px;
-  height: 22px;
-  border-radius: 6px;
-  background: linear-gradient(135deg, var(--accent-hi), var(--accent));
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
+  background: none;
   display: grid;
   place-items: center;
+  overflow: hidden;
   font-size: 13px;
   color: #fff;
 }

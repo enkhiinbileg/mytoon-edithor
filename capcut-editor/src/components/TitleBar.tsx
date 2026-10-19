@@ -16,7 +16,14 @@ export default function TitleBar({ onExport, onSave, onOpen, onNew, onClose, onO
       onClick={onGoHome}
       style={{ cursor: 'pointer' }}
     >
-      <span className="logo-mark"><Icon name="scissors" /></span>
+      <span className="logo-mark">
+        <img
+          src="./logo.png"
+          alt="Logo"
+          draggable={false}
+          style={{ width: 24, height: 24, borderRadius: 5, objectFit: 'cover', display: 'block' }}
+        />
+      </span>
       <span>Cutline</span>
     </div>
     <button
@@ -46,7 +53,8 @@ export default function TitleBar({ onExport, onSave, onOpen, onNew, onClose, onO
         <button onClick={() => {setMenu(false);onOpenProjects();}}>📁 Төслийн сан <kbd>Ctrl P</kbd></button>
         <button onClick={() => {setMenu(false);onNew();}}>Шинэ төсөл <kbd>Ctrl N</kbd></button>
         <button onClick={() => {setMenu(false);onOpen();}}>Файлаас нээх <kbd>Ctrl O</kbd></button>
-        <hr /><button onClick={() => {setMenu(false);onSave();}}>Хадгалах <kbd>Ctrl S</kbd></button>
+        <hr /><button onClick={() => {setMenu(false); window.dispatchEvent(new CustomEvent('open-audio-merger'));}}>🎵 Аудио нэгтгэх (Merge Audio)</button>
+        <button onClick={() => {setMenu(false);onSave();}}>Хадгалах <kbd>Ctrl S</kbd></button>
         <button onClick={() => {setMenu(false);onSave(true);}}>Өөр нэрээр хадгалах <kbd>Ctrl Shift S</kbd></button>
       </div></>}
     </div>
@@ -69,6 +77,27 @@ export default function TitleBar({ onExport, onSave, onOpen, onNew, onClose, onO
     >
       <span>📁</span>
       <span>Төслүүд</span>
+    </button>
+    <button
+      type="button"
+      className="btn ghost"
+      onClick={() => window.dispatchEvent(new CustomEvent('open-audio-merger'))}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '4px 10px',
+        fontSize: 12,
+        fontWeight: 600,
+        background: 'rgba(99,102,241,0.1)',
+        border: '1px solid rgba(99,102,241,0.25)',
+        borderRadius: 'var(--radius-sm)',
+        color: '#a5b4fc'
+      }}
+      title="Хоёр буюу түүнээс олон аудио нэгтгэх"
+    >
+      <span>🎵</span>
+      <span>Аудио нэгтгэх</span>
     </button>
     <div className="title-project"><input aria-label="Project name" value={name} onChange={e => rename(e.target.value)} onFocus={() => useEditor.getState().beginGesture()} onBlur={() => useEditor.getState().endGesture()} /><span className="save-state">{dirty ? '● Хадгалагдаагүй' : '✓ Автоматаар хадгалагдсан'}</span></div>
     <div className="titlebar-actions">

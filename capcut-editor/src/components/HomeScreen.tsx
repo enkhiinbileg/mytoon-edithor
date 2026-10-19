@@ -235,19 +235,18 @@ export default function HomeScreen({ onEnterEditor }: HomeScreenProps) {
       >
         {/* Brand Logo */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 700, fontSize: 13 }}>
-          <div
+          <img
+            src="./logo.png"
+            alt="Logo"
+            draggable={false}
             style={{
-              width: 22,
-              height: 22,
+              width: 24,
+              height: 24,
               borderRadius: 5,
-              background: 'linear-gradient(135deg, #06b6d4, #3b82f6)',
-              display: 'grid',
-              placeItems: 'center',
-              color: '#ffffff'
+              objectFit: 'cover',
+              display: 'block'
             }}
-          >
-            <Icon name="scissors" style={{ width: 13, height: 13 }} />
-          </div>
+          />
           <span style={{ letterSpacing: 0.3, color: '#f3f4f6', fontWeight: 700 }}>Cutline</span>
           <span
             style={{
@@ -342,21 +341,19 @@ export default function HomeScreen({ onEnterEditor }: HomeScreenProps) {
             }}
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <div
+              <img
+                src="./logo.png"
+                alt="Logo"
+                draggable={false}
                 style={{
                   width: 32,
                   height: 32,
                   borderRadius: '50%',
-                  background: 'linear-gradient(135deg, #2b2e38, #181920)',
-                  display: 'grid',
-                  placeItems: 'center',
-                  fontSize: 13,
-                  border: '1px solid rgba(255, 255, 255, 0.1)',
-                  color: '#9ca3af'
+                  objectFit: 'cover',
+                  border: '1px solid rgba(255, 255, 255, 0.12)',
+                  flexShrink: 0
                 }}
-              >
-                <Icon name="unlock" style={{ width: 16, height: 16 }} />
-              </div>
+              />
               <div style={{ display: 'flex', flexDirection: 'column' }}>
                 <span style={{ fontSize: 12, fontWeight: 650, color: '#f3f4f6' }}>Cutline Creator</span>
                 <span style={{ fontSize: 10, color: '#717682' }}>Pro Local Edition</span>
@@ -516,6 +513,37 @@ export default function HomeScreen({ onEnterEditor }: HomeScreenProps) {
             >
               <Icon name="dub" style={{ width: 15, height: 15 }} />
               <span>Auto Dubbing</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => window.dispatchEvent(new CustomEvent('open-audio-merger'))}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                padding: '7px 12px',
+                borderRadius: 6,
+                color: '#818cf8',
+                background: 'rgba(99, 102, 241, 0.08)',
+                border: '1px solid rgba(99, 102, 241, 0.2)',
+                fontSize: 13,
+                textAlign: 'left',
+                marginTop: 4,
+                cursor: 'pointer',
+                transition: 'all 0.15s'
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.color = '#a5b4fc';
+                e.currentTarget.style.background = 'rgba(99, 102, 241, 0.18)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.color = '#818cf8';
+                e.currentTarget.style.background = 'rgba(99, 102, 241, 0.08)';
+              }}
+            >
+              <span style={{ fontSize: 15 }}>🎵</span>
+              <span style={{ fontWeight: 600 }}>Аудио нэгтгэх</span>
             </button>
           </div>
 

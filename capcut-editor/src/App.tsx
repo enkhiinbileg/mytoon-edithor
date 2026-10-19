@@ -13,6 +13,7 @@ import ExportDialog, { type ExportOptions } from './components/ExportDialog';
 import ProjectsModal from './components/ProjectsModal';
 import ScriptStudioModal from './components/ScriptStudioModal';
 import AudioScriptModal from './components/AudioScriptModal';
+import AudioMergerModal from './components/AudioMergerModal';
 import HomeScreen from './components/HomeScreen';
 import { saveProject, openProject, restoreProject, startProjectAutosave, flushDraft, deleteProject } from './project';
 import { importPaths } from './importMedia';
@@ -34,10 +35,12 @@ export default function App() {
   const [projectsOpen, setProjectsOpen] = useState(false);
   const [scriptStudioOpen, setScriptStudioOpen] = useState(false);
   const [audioScriptOpen, setAudioScriptOpen] = useState(false);
+  const [audioMergerOpen, setAudioMergerOpen] = useState(false);
 
   useEffect(() => {
     const handleOpenStudio = () => setScriptStudioOpen(true);
     const handleOpenAudioScript = () => setAudioScriptOpen(true);
+    const handleOpenAudioMerger = () => setAudioMergerOpen(true);
     const handleOpenAutoSync = () => {
       setTab('text');
       setTimeout(() => {
@@ -46,10 +49,12 @@ export default function App() {
     };
     window.addEventListener('open-script-studio', handleOpenStudio);
     window.addEventListener('open-audio-script', handleOpenAudioScript);
+    window.addEventListener('open-audio-merger', handleOpenAudioMerger);
     window.addEventListener('open-auto-sync', handleOpenAutoSync);
     return () => {
       window.removeEventListener('open-script-studio', handleOpenStudio);
       window.removeEventListener('open-audio-script', handleOpenAudioScript);
+      window.removeEventListener('open-audio-merger', handleOpenAudioMerger);
       window.removeEventListener('open-auto-sync', handleOpenAutoSync);
     };
   }, []);
@@ -489,6 +494,11 @@ export default function App() {
             setNotice(msg);
             setTimeout(() => setNotice(null), 6000);
           }}
+        />
+      )}
+      {audioMergerOpen && (
+        <AudioMergerModal
+          onClose={() => setAudioMergerOpen(false)}
         />
       )}
       {notice && <div className="toast" role="status" onClick={()=>setNotice(null)}>{notice}<button className="notice-close" aria-label="Dismiss message" onClick={()=>setNotice(null)}>×</button></div>}

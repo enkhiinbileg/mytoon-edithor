@@ -35,11 +35,31 @@ const MODELS = [
 const isV3 = (modelId) => String(modelId).startsWith('eleven_v3');
 const isV4 = (modelId) => String(modelId).startsWith('eleven_v4');
 
+const REQUEST_TIMEOUT_MS = 240000;
+
 async function request(pathname, apiKey, init = {}) {
-  const res = await fetch(API + pathname, {
-    ...init,
-    headers: { 'xi-api-key': apiKey, ...(init.headers || {}) }
-  });
+  let res;
+  const timeoutSignal = AbortSignal.timeout(init.timeoutMs || REQUEST_TIMEOUT_MS);
+  const signal = init.signal ? AbortSignal.any([init.signal, timeoutSignal]) : timeoutSignal;
+  try {
+    res = await fetch(API + pathname, {
+      ...init,
+      signal,
+      headers: { 'xi-api-key': apiKey, ...(init.headers || {}) }
+    });
+  } catch (err) {
+    if (timeoutSignal.aborted && !init.signal?.aborted) {
+      const error = new Error(`ElevenLabs хариу ${Math.round((init.timeoutMs || REQUEST_TIMEOUT_MS) / 1000)} секундэд ирсэнгүй (timeout).`);
+      error.code = 'ETIMEDOUT';
+      throw error;
+    }
+    const causeMsg = err.cause?.message || err.cause?.code || '';
+    const fullMsg = causeMsg ? `${err.message} (${causeMsg})` : err.message;
+    const error = new Error(`ElevenLabs сүлжээний алдаа: ${fullMsg}`);
+    error.cause = err.cause;
+    error.code = err.cause?.code || 'FETCH_FAILED';
+    throw error;
+  }
   if (!res.ok) {
     let body = null;
     try {

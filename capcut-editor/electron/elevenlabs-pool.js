@@ -257,17 +257,36 @@ async function dispatchPoolTTS({
 
   const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
-  // Helper to find next available worker with sufficient remaining credits
+  function getModelCreditMultiplier(mId) {
+    const m = String(mId || '').toLowerCase();
+    if (m.includes('turbo') || m.includes('flash')) return 0.5;
+    return 1.0;
+  }
+  const modelMultiplier = getModelCreditMultiplier(modelId);
+
+  function getMaxRequestLimit(w) {
+    const tier = String(w.quota?.tier || '').toLowerCase();
+    if (tier === 'free') return 2450;
+    if (tier === 'starter') return 5000;
+    return 10000;
+  }
+
+  // Helper to find next available worker with sufficient remaining credits and tier capacity
   function getAvailableWorker(task) {
     const now = Date.now();
     const reqChars = task.text.length;
+    const reqCredits = Math.ceil(reqChars * modelMultiplier);
 
     const eligible = workers.filter(
       (w) => !w.busy && !w.exhausted && w.cooldownUntil <= now && !task.failedKeys.has(w.id)
     );
 
-    // Prefer workers with enough credits for this chunk
-    const sufficient = eligible.filter((w) => w.remaining >= reqChars);
+    // Prefer workers with enough credits for this chunk AND within tier per-request character limit
+    const sufficient = eligible.filter((w) => {
+      const charLimit = getMaxRequestLimit(w);
+      return charLimit >= reqChars && w.remaining >= reqCredits;
+    });
+
     if (sufficient.length > 0) {
       // Best-fit: pick worker with smallest sufficient balance first
       // to maximize pool utilization and preserve high-balance keys
@@ -295,7 +314,7 @@ async function dispatchPoolTTS({
 
       let worker = getAvailableWorker(task);
 
-      // If worker not immediately available, handle busy / fragmented credits
+      // If worker not immediately available, handle busy / fragmented credits / tier limits
       while (!worker && !fatalError) {
         const now = Date.now();
         const usableWorkers = workers.filter((w) => !w.exhausted && w.remaining > 0);
@@ -311,10 +330,14 @@ async function dispatchPoolTTS({
         );
 
         if (idleWorkers.length > 0) {
-          const maxIdleRemaining = Math.max(...idleWorkers.map((w) => w.remaining));
-          // If task text is larger than any idle worker's balance, dynamically sub-chunk it!
-          if (task.text.length > maxIdleRemaining && maxIdleRemaining >= 20) {
-            const splitPair = splitTaskAtBoundary(task.text, Math.max(15, maxIdleRemaining - 5));
+          const maxIdleAllowed = Math.max(...idleWorkers.map((w) => {
+            const charLimit = getMaxRequestLimit(w);
+            const affordableChars = Math.floor(w.remaining / modelMultiplier);
+            return Math.min(charLimit, affordableChars);
+          }));
+          // If task text is larger than any idle worker's allowed limit, dynamically sub-chunk it!
+          if (task.text.length > maxIdleAllowed && maxIdleAllowed >= 20) {
+            const splitPair = splitTaskAtBoundary(task.text, Math.max(15, maxIdleAllowed - 5));
             if (splitPair) {
               const [part1, part2] = splitPair;
               const subTask1 = {
@@ -351,8 +374,12 @@ async function dispatchPoolTTS({
           if (worker) break;
         }
 
-        // If no workers are busy and task cannot be split into any worker's balance
-        const maxOverall = Math.max(...usableWorkers.map((w) => w.remaining));
+        // If no workers are busy and task cannot be split into any worker's balance or tier limit
+        const maxOverall = Math.max(...usableWorkers.map((w) => {
+          const charLimit = getMaxRequestLimit(w);
+          const affordableChars = Math.floor(w.remaining / modelMultiplier);
+          return Math.min(charLimit, affordableChars);
+        }));
         if (task.text.length > maxOverall) {
           if (maxOverall >= 20) {
             const splitPair = splitTaskAtBoundary(task.text, Math.max(15, maxOverall - 5));
@@ -375,8 +402,10 @@ async function dispatchPoolTTS({
               break;
             }
           }
+          const neededCredits = Math.ceil(task.text.length * modelMultiplier);
+          const maxCredits = Math.max(...usableWorkers.map((w) => w.remaining));
           throw new Error(
-            `Хэсэг (${task.text.length} тэмдэгт)-ийг уншуулахад түлхүүрүүдийн үлдэгдэл хүрэлцэхгүй байна (Хамгийн их үлдэгдэл: ${maxOverall} кредит).`
+            `Хэсэг (${task.text.length} тэмдэгт, ~${neededCredits} кредит)-ийг уншуулахад түлхүүрүүдийн үлдэгдэл хүрэлцэхгүй байна (Хамгийн их үлдэгдэл: ${maxCredits} кредит).`
           );
         }
 
@@ -459,11 +488,12 @@ async function dispatchPoolTTS({
           }
         }
 
-        // Deduct credits used
-        worker.remaining = Math.max(0, worker.remaining - task.text.length);
+        // Deduct credits used according to model tariff multiplier
+        const creditsDeducted = Math.ceil(task.text.length * modelMultiplier);
+        worker.remaining = Math.max(0, worker.remaining - creditsDeducted);
         if (worker.quota) {
           worker.quota.remaining = worker.remaining;
-          worker.quota.used = (worker.quota.used || 0) + task.text.length;
+          worker.quota.used = (worker.quota.used || 0) + creditsDeducted;
         }
         if (worker.remaining <= 0) {
           worker.exhausted = true;
@@ -481,12 +511,13 @@ async function dispatchPoolTTS({
           completedCount,
           totalChunks: displayTotal,
           keyLabel: worker.label,
-          message: `✅ [${completedCount}/${displayTotal}] хэсэг амжилттай (${worker.label}, үлдэгдэл: ${worker.remaining.toLocaleString()})...`
+          message: `✅ [${completedCount}/${displayTotal}] хэсэг амжилттай (${worker.label}, -${creditsDeducted} кредит, үлдэгдэл: ${worker.remaining.toLocaleString()})...`
         });
       } catch (err) {
         worker.busy = false;
         if (fatalError) return;
-        const errMsg = String(err.message || err);
+        const causeStr = err.cause?.message || err.cause?.code || '';
+        const errMsg = causeStr ? `${err.message} (${causeStr})` : String(err.message || err);
         const kind = classifyError(err);
         task.retries++;
 

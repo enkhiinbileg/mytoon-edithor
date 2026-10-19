@@ -26,6 +26,14 @@ const appDir = path.join(output,'resources','app');
   }
   await esbuild.build({entryPoints:[path.join(root,'electron','main.js')],outfile:path.join(appDir,'electron','main.js'),bundle:true,platform:'node',target:'node20',external:['electron'],logLevel:'info'});
   fs.copyFileSync(path.join(root,'electron','preload.js'),path.join(appDir,'electron','preload.js'));
+  for (const asset of ['icon.ico', 'logo.png']) {
+    const srcAsset = path.join(root, 'electron', asset);
+    if (fs.existsSync(srcAsset)) {
+      fs.copyFileSync(srcAsset, path.join(appDir, 'electron', asset));
+      fs.copyFileSync(srcAsset, path.join(appDir, asset));
+      fs.copyFileSync(srcAsset, path.join(output, asset));
+    }
+  }
   fs.cpSync(path.join(root,'dist'),path.join(appDir,'dist'),{recursive:true});
   if (fs.existsSync(path.join(root, 'full_story_alignments.json'))) {
     fs.copyFileSync(path.join(root, 'full_story_alignments.json'), path.join(appDir, 'full_story_alignments.json'));
@@ -40,7 +48,7 @@ const appDir = path.join(output,'resources','app');
   }
   fs.writeFileSync(path.join(appDir,'package.json'),JSON.stringify({name:'capcut-editor',productName:'Cutline',version:'0.2.0',main:'electron/main.js'},null,2));
   try {
-    fs.copyFileSync(path.join(output,'electron.exe'),path.join(output,'Cutline.exe'));
+    fs.renameSync(path.join(output,'electron.exe'),path.join(output,'Cutline.exe'));
   } catch {}
   console.log('Portable app: '+path.join(output,'Cutline.exe'));
 })().catch(e=>{console.error(e);process.exitCode=1;});

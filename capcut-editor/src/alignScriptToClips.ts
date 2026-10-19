@@ -14,6 +14,33 @@ export interface AlignResult<T> {
   message: string;
 }
 
+const LatinToCyrMap: ReadonlyArray< readonly [string, string] > = [
+  ['sh', 'ш'], ['ch', 'ч'], ['ts', 'ц'], ['kh', 'х'], ['zh', 'ж'],
+  ['ya', 'я'], ['yu', 'ю'], ['yo', 'ё'], ['ye', 'е'],
+  ['a', 'а'], ['b', 'б'], ['c', 'к'], ['d', 'д'], ['e', 'э'],
+  ['f', 'ф'], ['g', 'г'], ['h', 'х'], ['i', 'и'], ['j', 'ж'],
+  ['k', 'к'], ['l', 'л'], ['m', 'м'], ['n', 'н'], ['o', 'о'],
+  ['p', 'п'], ['q', 'к'], ['r', 'р'], ['s', 'с'], ['t', 'т'],
+  ['u', 'у'], ['v', 'в'], ['w', 'в'], ['x', 'кс'], ['y', 'и'], ['z', 'з']
+];
+
+const DigitWordMap: Record<string, string> = {
+  '1': 'нэг',
+  '2': 'хоёр',
+  '3': 'гурав',
+  '4': 'дөрөв',
+  '5': 'тав',
+  '6': 'зургаа',
+  '7': 'долоо',
+  '8': 'найм',
+  '9': 'ес',
+  '10': 'арав',
+  '12': 'арванхоёр',
+  '30': 'гуч',
+  '40': 'дөч',
+  '150': 'зуунтавь'
+};
+
 /**
  * Normalizes a word for fuzzy matching (lowercase, removes punctuation).
  * Supports both Mongolian Cyrillic and Latin alphabets.
@@ -25,92 +52,95 @@ export function normalizeWord(w: string): string {
 }
 
 /**
- * Calculates similarity between two words (0.0 to 1.0) using Levenshtein distance.
+ * Phonetic normalization for Mongolian ASR matching:
+ * maps numbers to spoken stems, transliterates Latin to Cyrillic,
+ * and collapses commonly confused vowels/consonants.
  */
-export function wordSimilarity(w1: string, w2: string): number {
-  const s1 = normalizeWord(w1);
-  const s2 = normalizeWord(w2);
+export function phoneticNormalize(w: string): string {
+  let s = normalizeWord(w);
+  if (!s) return '';
+  if (DigitWordMap[s]) s = DigitWordMap[s];
+  if (/[a-z]/.test(s)) {
+    for (const [lat, cyr] of LatinToCyrMap) {
+      s = s.split(lat).join(cyr);
+    }
+  }
+  return s
+    .replace(/[өүо]/g, 'у')
+    .replace(/ё/g, 'е')
+    .replace(/я/g, 'а')
+    .replace(/[эыій]/g, 'и')
+    .replace(/[ъь]/g, '')
+    .replace(/([а-яёөү])\1+/g, '$1');
+}
+
+const EDIT_DP_BUF = new Int32Array(64 * 64);
+
+function editDistanceSimilarity(s1: string, s2: string): number {
   if (!s1 || !s2) return 0;
   if (s1 === s2) return 1.0;
-  if (s1.includes(s2) || s2.includes(s1)) {
-    const minL = Math.min(s1.length, s2.length);
-    const maxL = Math.max(s1.length, s2.length);
-    return minL / maxL;
-  }
-
   const m = s1.length;
   const n = s2.length;
-  if (Math.abs(m - n) > 3) return 0;
+  const maxLen = m > n ? m : n;
+  const maxDist = Math.floor(maxLen * 0.5);
+  if (Math.abs(m - n) > maxDist || m >= 63 || n >= 63) return 0;
 
-  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
-  for (let i = 0; i <= m; i++) dp[i][0] = i;
-  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  const stride = n + 1;
+  for (let j = 0; j <= n; j++) EDIT_DP_BUF[j] = j;
 
   for (let i = 1; i <= m; i++) {
+    const c1 = s1.charCodeAt(i - 1);
+    const rowOff = i * stride;
+    const prevOff = (i - 1) * stride;
+    EDIT_DP_BUF[rowOff] = i;
+    let rowMin = i;
     for (let j = 1; j <= n; j++) {
-      const cost = s1[i - 1] === s2[j - 1] ? 0 : 1;
-      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+      const cost = c1 === s2.charCodeAt(j - 1) ? 0 : 1;
+      const del = EDIT_DP_BUF[prevOff + j] + 1;
+      const ins = EDIT_DP_BUF[rowOff + (j - 1)] + 1;
+      const sub = EDIT_DP_BUF[prevOff + (j - 1)] + cost;
+      const val = del < ins ? (del < sub ? del : sub) : (ins < sub ? ins : sub);
+      EDIT_DP_BUF[rowOff + j] = val;
+      if (val < rowMin) rowMin = val;
+    }
+    if (rowMin > maxDist) return 0;
+  }
+
+  const dist = EDIT_DP_BUF[m * stride + n];
+  return Math.max(0, 1 - dist / maxLen);
+}
+
+function fastTokenSimilarity(n1: string, p1: string, n2: string, p2: string): number {
+  if (!n1 || !n2) return 0;
+  if (n1 === n2) return 1.0;
+  if (p1 && p1 === p2) return 0.95;
+
+  const rawSim = editDistanceSimilarity(n1, n2);
+  const phonSim = p1 && p2 ? editDistanceSimilarity(p1, p2) * 0.95 : 0;
+
+  let prefixSim = 0;
+  const minL = Math.min(p1.length, p2.length);
+  const maxL = Math.max(p1.length, p2.length);
+  if (minL >= 4 && p1.charCodeAt(0) === p2.charCodeAt(0)) {
+    let common = 0;
+    while (common < minL && p1.charCodeAt(common) === p2.charCodeAt(common)) common++;
+    if (common >= 4) {
+      prefixSim = Math.min(0.88, common / maxL + 0.15);
     }
   }
 
-  const maxLen = Math.max(m, n);
-  return Math.max(0, 1 - dp[m][n] / maxLen);
-}
-
-interface CandidateMatch {
-  sIdx: number;
-  aIdx: number;
-  score: number;
+  return Math.max(rawSim, phonSim, prefixSim);
 }
 
 /**
- * Finds the Longest Increasing Subsequence (LIS) of anchor matches.
- * Enforces monotonic forward time progression.
+ * Calculates similarity between two words (0.0 to 1.0) using Levenshtein and Mongolian phonetic distance.
  */
-function findAnchorSequence(candidates: CandidateMatch[]): CandidateMatch[] {
-  if (!candidates.length) return [];
-  candidates.sort((a, b) => a.sIdx - b.sIdx || a.aIdx - b.aIdx);
-
-  const n = candidates.length;
-  const dp = new Float64Array(n);
-  const parent = new Int32Array(n).fill(-1);
-
-  let bestIdx = 0;
-  let maxScore = 0;
-
-  for (let i = 0; i < n; i++) {
-    const c_i = candidates[i];
-    dp[i] = c_i.score;
-    const lookbackStart = Math.max(0, i - 250);
-    for (let j = i - 1; j >= lookbackStart; j--) {
-      const c_j = candidates[j];
-      if (c_j.sIdx < c_i.sIdx && c_j.aIdx < c_i.aIdx) {
-        const sDiff = c_i.sIdx - c_j.sIdx;
-        const aDiff = c_i.aIdx - c_j.aIdx;
-        const ratio = sDiff / Math.max(1, aDiff);
-        const distPenalty = Math.abs(ratio - 1.0) * 0.2;
-        const score = dp[j] + c_i.score - distPenalty;
-
-        if (score > dp[i]) {
-          dp[i] = score;
-          parent[i] = j;
-        }
-      }
-    }
-    if (dp[i] > maxScore) {
-      maxScore = dp[i];
-      bestIdx = i;
-    }
-  }
-
-  const sequence: CandidateMatch[] = [];
-  let curr = bestIdx;
-  while (curr !== -1) {
-    sequence.push(candidates[curr]);
-    curr = parent[curr];
-  }
-  sequence.reverse();
-  return sequence;
+export function wordSimilarity(w1: string, w2: string): number {
+  const n1 = normalizeWord(w1);
+  const n2 = normalizeWord(w2);
+  if (!n1 || !n2) return 0;
+  if (n1 === n2) return 1.0;
+  return fastTokenSimilarity(n1, phoneticNormalize(w1), n2, phoneticNormalize(w2));
 }
 
 /**
@@ -124,14 +154,14 @@ function findBestClipWindow<T extends { id: string; style?: { text?: string }; t
   if (!scriptWords.length || !clips.length) return null;
 
   const targetWordCount = scriptWords.length;
-  const scriptNormSet = new Set(scriptWords.map(normalizeWord).filter(w => w.length >= 3));
-  if (scriptNormSet.size === 0) return null;
+  const scriptPhonSet = new Set(scriptWords.map(phoneticNormalize).filter(w => w.length >= 3));
+  if (scriptPhonSet.size === 0) return null;
 
   const clipData = clips.map(c => {
     const t = c.style?.text || c.text || '';
     const words = t.match(/\S+/gu) || [];
-    const norms = words.map(normalizeWord).filter(w => w.length >= 3);
-    return { count: words.length, norms };
+    const phons = words.map(phoneticNormalize).filter(w => w.length >= 3);
+    return { count: words.length, phons };
   });
 
   let bestStart = -1;
@@ -145,15 +175,15 @@ function findBestClipWindow<T extends { id: string; style?: { text?: string }; t
 
     while (j < clips.length && accumulatedWords < targetWordCount * 1.35) {
       accumulatedWords += Math.max(1, clipData[j].count);
-      for (const nw of clipData[j].norms) {
-        if (scriptNormSet.has(nw)) {
+      for (const pw of clipData[j].phons) {
+        if (scriptPhonSet.has(pw)) {
           overlapCount++;
         }
       }
 
       if (accumulatedWords >= targetWordCount * 0.6) {
         const lenDiff = Math.abs(accumulatedWords - targetWordCount);
-        const score = (overlapCount * 3.0) - (lenDiff * 0.4);
+        const score = overlapCount * 3.0 - lenDiff * 0.4;
         if (overlapCount >= 2 && score > bestScore) {
           bestScore = score;
           bestStart = i;
@@ -170,9 +200,98 @@ function findBestClipWindow<T extends { id: string; style?: { text?: string }; t
   return null;
 }
 
+interface Anchor {
+  sIdx: number;
+  aIdx: number;
+  clipIdx: number;
+  sim: number;
+}
+
+interface TokenInfo {
+  orig: string;
+  norm: string;
+  phon: string;
+}
+
+interface AsrWord extends TokenInfo {
+  clipIdx: number;
+  wordIdx: number;
+  time: number;
+}
+
 /**
- * Core word-to-clip alignment algorithm.
- * Guarantees zero blank clips and preserves timestamps.
+ * Detects and heals regions where Whisper chunk boundaries duplicated a spoken passage:
+ * re-anchors the second (true-time) duplicate copy and allows preceding script words
+ * to distribute evenly across the first half.
+ */
+function healShiftedDuplicateRegions(
+  anchors: Anchor[],
+  scriptTokens: TokenInfo[],
+  asrWords: AsrWord[]
+): Anchor[] {
+  const result = anchors.slice();
+  for (let k1 = 0; k1 < result.length - 1; k1++) {
+    const a1 = result[k1];
+    const a2 = result[k1 + 1];
+    const ds1 = a2.sIdx - a1.sIdx;
+    const da1 = a2.aIdx - a1.aIdx;
+    if (ds1 - da1 >= 8 && ds1 >= da1 * 2.5) {
+      let k2 = -1;
+      let cumDs = 0;
+      let cumDa = 0;
+      const limit = Math.min(result.length - 1, k1 + 45);
+      for (let m = k1 + 1; m < limit; m++) {
+        cumDs += result[m + 1].sIdx - result[m].sIdx;
+        cumDa += result[m + 1].aIdx - result[m].aIdx;
+        if (cumDa - cumDs >= 8) {
+          k2 = m + 1;
+        }
+      }
+      if (k2 !== -1) {
+        const startAnchor = result[k1];
+        const endAnchor = result[k2];
+        const reAnchored: Anchor[] = [];
+        let curA = endAnchor.aIdx;
+        let misses = 0;
+        for (let s = endAnchor.sIdx - 1; s > startAnchor.sIdx; s--) {
+          const st = scriptTokens[s];
+          let bestA = -1;
+          let bestSim = 0;
+          const minA = Math.max(startAnchor.aIdx + 1, curA - 2);
+          for (let a = curA - 1; a >= minA; a--) {
+            const aw = asrWords[a];
+            const sim = fastTokenSimilarity(st.norm, st.phon, aw.norm, aw.phon);
+            if (sim >= 0.70 && sim > bestSim) {
+              bestSim = sim;
+              bestA = a;
+              if (sim >= 0.92) break;
+            }
+          }
+          if (bestA !== -1) {
+            reAnchored.push({
+              sIdx: s,
+              aIdx: bestA,
+              clipIdx: asrWords[bestA].clipIdx,
+              sim: bestSim
+            });
+            curA = bestA;
+            misses = 0;
+          } else {
+            misses++;
+            if (misses >= 2) break;
+          }
+        }
+        reAnchored.reverse();
+        result.splice(k1 + 1, k2 - k1 - 1, ...reAnchored);
+      }
+    }
+  }
+  return result;
+}
+
+/**
+ * Core word-to-clip alignment algorithm using Banded Global Dynamic Programming (Needleman-Wunsch).
+ * Prevents greedy forward lookahead drift and preserves exact clip timestamps.
  */
 function alignWordsToTargetClips<T extends { id: string; start?: number; inPoint?: number; outPoint?: number; style?: { text?: string }; text?: string }>(
   scriptWords: string[],
@@ -180,25 +299,18 @@ function alignWordsToTargetClips<T extends { id: string; start?: number; inPoint
 ): T[] {
   if (!scriptWords.length || !targetClips.length) return targetClips;
 
-  interface AsrWord {
-    clipIdx: number;
-    wordIdx: number;
-    orig: string;
-    norm: string;
-    time: number;
-  }
-
   const asrWords: AsrWord[] = [];
   targetClips.forEach((clip, clipIdx) => {
-    const text = clip.style?.text || clip.text || '';
+    const text = (clip as any).asrText || clip.style?.text || clip.text || '';
     const words = text.match(/\S+/gu) || [];
-    const clipStart = typeof clip.start === 'number' ? clip.start : (clipIdx * 2.0);
+    const clipStart = typeof clip.start === 'number' ? clip.start : clipIdx * 2.0;
     words.forEach((w, wordIdx) => {
       asrWords.push({
         clipIdx,
         wordIdx,
         orig: w,
         norm: normalizeWord(w),
+        phon: phoneticNormalize(w),
         time: clipStart
       });
     });
@@ -217,152 +329,273 @@ function alignWordsToTargetClips<T extends { id: string; start?: number; inPoint
     });
   }
 
-  // 1. Monotonic forward anchor discovery bounded by physical speech rate (max ~4.2 words/sec)
-  let sCur = 0;
-  let lastAnchorTime = asrWords[0].time;
-  interface Anchor {
-    sIdx: number;
-    aIdx: number;
-    clipIdx: number;
-    time: number;
-  }
-  const anchors: Anchor[] = [];
+  const scriptTokens: TokenInfo[] = scriptWords.map(w => ({
+    orig: w,
+    norm: normalizeWord(w),
+    phon: phoneticNormalize(w)
+  }));
 
-  for (let a = 0; a < asrWords.length; a++) {
-    const aw = asrWords[a];
-    if (!aw.norm || aw.norm.length < 3) continue;
+  const S = scriptTokens.length;
+  const A = asrWords.length;
+  const BAND = Math.max(45, Math.min(240, Math.round(Math.max(S, A) * 0.065)));
 
-    const deltaTime = Math.max(0, aw.time - lastAnchorTime);
-    const maxWordsAllowed = Math.max(12, Math.round(deltaTime * 4.2) + 6);
-    const maxLookahead = Math.min(scriptWords.length - 1, sCur + maxWordsAllowed);
+  const rowOffset = new Int32Array(S + 1);
+  const rowLen = new Int32Array(S + 1);
+  const rowStartIdx = new Int32Array(S + 1);
+  let totalCells = 0;
 
-    let bestS = -1;
-    let bestSim = 0;
-
-    for (let s = sCur; s <= maxLookahead; s++) {
-      const swNorm = normalizeWord(scriptWords[s]);
-      if (!swNorm) continue;
-
-      if (swNorm === aw.norm) {
-        bestS = s;
-        bestSim = 1.0;
-        break;
-      }
-      const sim = wordSimilarity(swNorm, aw.norm);
-      if (sim >= 0.85 && sim > bestSim) {
-        bestSim = sim;
-        bestS = s;
-      }
-    }
-
-    if (bestS !== -1 && bestSim >= 0.85) {
-      anchors.push({ sIdx: bestS, aIdx: a, clipIdx: aw.clipIdx, time: aw.time });
-      sCur = bestS + 1;
-      lastAnchorTime = aw.time;
-    }
+  for (let i = 0; i <= S; i++) {
+    const centerJ = Math.round((i / Math.max(1, S)) * A);
+    const minJ = Math.max(0, centerJ - BAND);
+    const maxJ = Math.min(A, centerJ + BAND);
+    rowOffset[i] = minJ;
+    rowLen[i] = maxJ - minJ + 1;
+    rowStartIdx[i] = totalCells;
+    totalCells += rowLen[i];
   }
 
-  if (anchors.length === 0) return targetClips;
+  const NEG_INF = -1e9;
+  const dp = new Float32Array(totalCells).fill(NEG_INF);
+  // move: 1 = diag match, 2 = up (skip script word), 3 = left (skip ASR word), 4 = diag mismatch
+  const move = new Uint8Array(totalCells);
 
-  // 2. Precompute clip weights based on clip duration and recognized words
-  const clipWeights = targetClips.map(c => {
-    const dur = typeof c.outPoint === 'number' && typeof c.inPoint === 'number'
-      ? Math.max(0.5, c.outPoint - c.inPoint)
-      : 2.0;
-    const wCount = (c.style?.text || c.text || '').match(/\S+/gu)?.length || 0;
-    return Math.max(1, wCount > 0 ? wCount : Math.round(dur * 2.8));
-  });
+  const cellIdx = (i: number, j: number): number => {
+    const minJ = rowOffset[i];
+    const len = rowLen[i];
+    if (j < minJ || j >= minJ + len) return -1;
+    return rowStartIdx[i] + (j - minJ);
+  };
 
-  const clipAlloc: string[][] = new Array(targetClips.length).fill(null).map(() => []);
+  const SKIP_PENALTY = 0.05;
+  dp[cellIdx(0, 0)] = 0;
+  for (let j = 1; j < rowOffset[0] + rowLen[0]; j++) {
+    const c = cellIdx(0, j);
+    dp[c] = -j * SKIP_PENALTY;
+    move[c] = 3;
+  }
 
-  function distributeSlice(sStart: number, sEnd: number, cStart: number, cEnd: number) {
-    if (sStart > sEnd || cStart > cEnd) return;
-    const words = scriptWords.slice(sStart, sEnd + 1);
-    if (!words.length) return;
+  for (let i = 1; i <= S; i++) {
+    const st = scriptTokens[i - 1];
+    const minSim = st.norm.length <= 2 ? 0.75 : 0.55;
+    const expectedJ = (i / Math.max(1, S)) * A;
+    const minJ = rowOffset[i];
+    const maxJ = minJ + rowLen[i] - 1;
 
-    if (cStart === cEnd) {
-      clipAlloc[cStart].push(...words);
-      return;
+    for (let j = minJ; j <= maxJ; j++) {
+      const c = rowStartIdx[i] + (j - minJ);
+      let bestScore = NEG_INF;
+      let bestMove = 0;
+
+      // 1. Up: skip script word i - 1
+      const cUp = cellIdx(i - 1, j);
+      if (cUp !== -1 && dp[cUp] > NEG_INF / 2) {
+        const sc = dp[cUp] - SKIP_PENALTY;
+        if (sc > bestScore) {
+          bestScore = sc;
+          bestMove = 2;
+        }
+      }
+
+      // 2. Left: skip ASR word j - 1
+      if (j > minJ) {
+        const cLeft = c - 1;
+        if (dp[cLeft] > NEG_INF / 2) {
+          const sc = dp[cLeft] - SKIP_PENALTY;
+          if (sc > bestScore) {
+            bestScore = sc;
+            bestMove = 3;
+          }
+        }
+      }
+
+      // 3. Diagonal: pair scriptTokens[i - 1] with asrWords[j - 1]
+      if (j >= 1) {
+        const cDiag = cellIdx(i - 1, j - 1);
+        if (cDiag !== -1 && dp[cDiag] > NEG_INF / 2) {
+          const aw = asrWords[j - 1];
+          const sim = fastTokenSimilarity(st.norm, st.phon, aw.norm, aw.phon);
+          if (sim >= minSim) {
+            const driftPenalty = (Math.abs(j - expectedJ) / BAND) * 0.12;
+            const gain = sim * sim * 2.2 - driftPenalty;
+            const sc = dp[cDiag] + gain;
+            if (sc > bestScore) {
+              bestScore = sc;
+              bestMove = 1;
+            }
+          } else {
+            const sc = dp[cDiag] - SKIP_PENALTY * 1.6;
+            if (sc > bestScore) {
+              bestScore = sc;
+              bestMove = 4;
+            }
+          }
+        }
+      }
+
+      dp[c] = bestScore;
+      move[c] = bestMove;
     }
+  }
 
-    let totalW = 0;
-    for (let c = cStart; c <= cEnd; c++) totalW += clipWeights[c];
-    if (totalW <= 0) totalW = cEnd - cStart + 1;
-
-    let wIdx = 0;
-    for (let c = cStart; c <= cEnd; c++) {
-      const isLast = (c === cEnd);
-      const clipW = clipWeights[c];
-      const take = isLast
-        ? (words.length - wIdx)
-        : Math.min(words.length - wIdx, Math.round((clipW / totalW) * words.length));
-
-      if (take > 0) {
-        clipAlloc[c].push(...words.slice(wIdx, wIdx + take));
-        wIdx += take;
+  let rawAnchors: Anchor[] = [];
+  let curI = S;
+  let curJ = A;
+  const endC = cellIdx(curI, curJ);
+  if (endC === -1 || dp[endC] <= NEG_INF / 2) {
+    let bestEndScore = NEG_INF;
+    for (let j = rowOffset[S]; j < rowOffset[S] + rowLen[S]; j++) {
+      const c = cellIdx(S, j);
+      if (dp[c] > bestEndScore) {
+        bestEndScore = dp[c];
+        curI = S;
+        curJ = j;
       }
     }
   }
 
-  // A. Distribute words before first anchor:
+  while (curI > 0 && curJ > 0) {
+    const c = cellIdx(curI, curJ);
+    if (c === -1) break;
+    const m = move[c];
+    if (m === 1) {
+      const sIdx = curI - 1;
+      const aIdx = curJ - 1;
+      const st = scriptTokens[sIdx];
+      const aw = asrWords[aIdx];
+      rawAnchors.push({
+        sIdx,
+        aIdx,
+        clipIdx: aw.clipIdx,
+        sim: fastTokenSimilarity(st.norm, st.phon, aw.norm, aw.phon)
+      });
+      curI--;
+      curJ--;
+    } else if (m === 2) {
+      curI--;
+    } else if (m === 3) {
+      curJ--;
+    } else if (m === 4) {
+      curI--;
+      curJ--;
+    } else {
+      break;
+    }
+  }
+  rawAnchors.reverse();
+
+  const minRequiredAnchors = S >= 3 ? Math.max(1, Math.min(2, Math.floor(S * 0.15))) : 1;
+  if (rawAnchors.length < minRequiredAnchors) {
+    throw new Error('Оруулсан скрипт хадмалын үгстэй таарахгүй байна.');
+  }
+
+  const anchors = healShiftedDuplicateRegions(rawAnchors, scriptTokens, asrWords);
+
+  // Map every script word to its target clip index using anchored ASR positions
+  const wordClipIdx = new Int32Array(S);
   const firstA = anchors[0];
-  if (firstA.sIdx > 0 && firstA.clipIdx > 0) {
-    distributeSlice(0, firstA.sIdx - 1, 0, firstA.clipIdx - 1);
+  for (let s = 0; s < firstA.sIdx; s++) {
+    if (firstA.aIdx > 0) {
+      const mappedA = Math.min(firstA.aIdx - 1, Math.floor((s / Math.max(1, firstA.sIdx)) * firstA.aIdx));
+      wordClipIdx[s] = asrWords[mappedA].clipIdx;
+    } else {
+      wordClipIdx[s] = firstA.clipIdx;
+    }
   }
-  clipAlloc[firstA.clipIdx].push(scriptWords[firstA.sIdx]);
 
-  // B. Distribute words between consecutive anchors:
-  for (let k = 0; k < anchors.length - 1; k++) {
+  for (let k = 0; k < anchors.length; k++) {
     const a1 = anchors[k];
-    const a2 = anchors[k + 1];
-    const sStart = a1.sIdx + 1;
-    const sEnd = a2.sIdx - 1;
-
-    if (sStart <= sEnd) {
-      distributeSlice(sStart, sEnd, a1.clipIdx, a2.clipIdx);
-    }
-    clipAlloc[a2.clipIdx].push(scriptWords[a2.sIdx]);
-  }
-
-  // C. Distribute words after last anchor (only up to timeline capacity):
-  const lastA = anchors[anchors.length - 1];
-  const remClips = targetClips.length - 1 - lastA.clipIdx;
-  if (remClips > 0) {
-    let remWeight = 0;
-    for (let c = lastA.clipIdx + 1; c < targetClips.length; c++) remWeight += clipWeights[c];
-    const wordsToTake = Math.min(scriptWords.length - 1 - lastA.sIdx, remWeight);
-    if (wordsToTake > 0) {
-      distributeSlice(lastA.sIdx + 1, lastA.sIdx + wordsToTake, lastA.clipIdx + 1, targetClips.length - 1);
-    }
-  }
-
-  // 3. Balance words across adjacent clips so no single clip exceeds comfortable reading length (<= 7 words)
-  const MAX_WORDS = 7;
-  for (let pass = 0; pass < 3; pass++) {
-    for (let c = 0; c < targetClips.length - 1; c++) {
-      if (clipAlloc[c].length > MAX_WORDS) {
-        const excess = clipAlloc[c].length - MAX_WORDS;
-        const moved = clipAlloc[c].splice(clipAlloc[c].length - excess, excess);
-        clipAlloc[c + 1].unshift(...moved);
+    wordClipIdx[a1.sIdx] = a1.clipIdx;
+    if (k < anchors.length - 1) {
+      const a2 = anchors[k + 1];
+      const sCount = a2.sIdx - a1.sIdx - 1;
+      if (sCount > 0) {
+        const aCount = a2.aIdx - a1.aIdx - 1;
+        let switchedToNext = false;
+        for (let offset = 1; offset <= sCount; offset++) {
+          const s = a1.sIdx + offset;
+          if (a1.clipIdx === a2.clipIdx) {
+            wordClipIdx[s] = a1.clipIdx;
+          } else if (aCount > 0) {
+            const rel = (offset - 0.5) / sCount;
+            const mappedA = a1.aIdx + 1 + Math.min(aCount - 1, Math.floor(rel * aCount));
+            wordClipIdx[s] = asrWords[mappedA].clipIdx;
+          } else {
+            const prevWord = scriptWords[s - 1] || '';
+            if (/[.!?…]["'»”’)]?$/.test(prevWord)) {
+              switchedToNext = true;
+            }
+            wordClipIdx[s] = switchedToNext ? a2.clipIdx : a1.clipIdx;
+          }
+        }
       }
     }
   }
 
-  // 4. Build updated clips (Keep original text for any clip with 0 assigned words)
-  const rawUpdated = targetClips.map((clip, idx) => {
-    const assigned = clipAlloc[idx];
-    const newText = (assigned && assigned.length > 0)
-      ? assigned.join(' ')
-      : (clip.style?.text || clip.text || '');
+  const lastA = anchors[anchors.length - 1];
+  const remS = S - 1 - lastA.sIdx;
+  const remA = A - 1 - lastA.aIdx;
+  for (let offset = 1; offset <= remS; offset++) {
+    const s = lastA.sIdx + offset;
+    if (remA > 0) {
+      const rel = (offset - 0.5) / remS;
+      const mappedA = lastA.aIdx + 1 + Math.min(remA - 1, Math.floor(rel * remA));
+      wordClipIdx[s] = asrWords[mappedA].clipIdx;
+    } else {
+      wordClipIdx[s] = lastA.clipIdx;
+    }
+  }
 
+  for (let s = 1; s < S; s++) {
+    if (wordClipIdx[s] < wordClipIdx[s - 1]) {
+      wordClipIdx[s] = wordClipIdx[s - 1];
+    }
+  }
+
+  const clipAlloc: string[][] = Array.from({ length: targetClips.length }, () => []);
+  for (let s = 0; s < S; s++) {
+    clipAlloc[wordClipIdx[s]].push(scriptWords[s]);
+  }
+
+  // Ensure no clip is left empty when there are enough script words to cover every clip
+  if (S >= targetClips.length) {
+    for (let c = 0; c < targetClips.length; c++) {
+      if (clipAlloc[c].length === 0) {
+        let donor = -1;
+        for (let dist = 1; dist < targetClips.length; dist++) {
+          if (c - dist >= 0 && clipAlloc[c - dist].length >= 2) {
+            donor = c - dist;
+            break;
+          }
+          if (c + dist < targetClips.length && clipAlloc[c + dist].length >= 2) {
+            donor = c + dist;
+            break;
+          }
+        }
+        if (donor !== -1) {
+          if (donor < c) {
+            for (let k = donor; k < c; k++) {
+              const moved = clipAlloc[k].pop()!;
+              clipAlloc[k + 1].unshift(moved);
+            }
+          } else {
+            for (let k = donor; k > c; k--) {
+              const moved = clipAlloc[k].shift()!;
+              clipAlloc[k - 1].push(moved);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return targetClips.map((clip, idx) => {
+    const newText = clipAlloc[idx].join(' ');
     return {
       ...clip,
       text: newText,
       style: clip.style ? { ...clip.style, text: newText } : ({ text: newText } as any)
     };
   });
-
-  return reflowSentenceBoundaries(rawUpdated).updatedClips;
 }
 
 /**
@@ -446,7 +679,7 @@ export function reflowSentenceBoundaries<T extends { id: string; style?: { text?
 /**
  * Aligns clean script words to subtitle clips.
  * Replaces misspelled ASR words with clean script text while preserving exact timestamps.
- * 
+ *
  * Automatically detects whether the pasted text is a partial snippet or full script,
  * or allows targeting selected clips.
  */
@@ -468,25 +701,28 @@ export function alignScriptToClips<T extends { id: string; style?: { text?: stri
   const requestedMode = options.mode || 'auto';
 
   // 1. Selected Clips Mode
-  if (requestedMode === 'selected' || (options.selectedClipId && requestedMode !== 'full')) {
+  if (requestedMode === 'selected') {
     const selId = options.selectedClipId;
     const selIdx = clips.findIndex(c => c.id === selId);
 
     if (selIdx !== -1) {
-      // Calculate how many clips this text should span
-      const wordsPerClipAvg = 5;
-      const spanCount = Math.max(1, Math.ceil(rawWords.length / wordsPerClipAvg));
-      const endIdx = Math.min(clips.length - 1, selIdx + spanCount - 1);
+      let endIdx = selIdx;
+      let accWords = 0;
+      for (let i = selIdx; i < clips.length; i++) {
+        const wLen = ((clips[i].style?.text || clips[i].text || '').match(/\S+/gu) || []).length;
+        accWords += Math.max(1, wLen);
+        endIdx = i;
+        if (accWords >= rawWords.length * 0.8) break;
+      }
       const targetSlice = clips.slice(selIdx, endIdx + 1);
 
       const alignedSlice = alignWordsToTargetClips(rawWords, targetSlice);
       const sliceMap = new Map(alignedSlice.map(c => [c.id, c]));
 
       const updatedClips = clips.map(c => sliceMap.get(c.id) || c);
-      const finalClips = reflowSentenceBoundaries(updatedClips).updatedClips;
 
       return {
-        updatedClips: finalClips,
+        updatedClips,
         updatedCount: targetSlice.length,
         matchedRange: { start: selIdx, end: endIdx },
         modeUsed: 'selected',
@@ -502,7 +738,7 @@ export function alignScriptToClips<T extends { id: string; style?: { text?: stri
     totalTimelineWords += (t.match(/\S+/gu) || []).length;
   }
 
-  // 2. Auto Mode: Check if this is a partial snippet (< 45% of total words and >= 8 clips)
+  // 2. Auto Mode: Check if this is a partial snippet (< 45% of total words and >= 6 clips)
   const isPartial = requestedMode === 'auto' && rawWords.length < Math.max(15, totalTimelineWords * 0.45) && clips.length >= 6;
 
   if (isPartial) {
@@ -513,10 +749,9 @@ export function alignScriptToClips<T extends { id: string; style?: { text?: stri
       const sliceMap = new Map(alignedSlice.map(c => [c.id, c]));
 
       const updatedClips = clips.map(c => sliceMap.get(c.id) || c);
-      const finalClips = reflowSentenceBoundaries(updatedClips).updatedClips;
 
       return {
-        updatedClips: finalClips,
+        updatedClips,
         updatedCount: targetSlice.length,
         matchedRange: { start: windowFound.start, end: windowFound.end },
         modeUsed: 'auto',
@@ -526,11 +761,10 @@ export function alignScriptToClips<T extends { id: string; style?: { text?: stri
   }
 
   // 3. Full Script Mode: Align across all clips
-  const alignedAll = alignWordsToTargetClips(rawWords, clips);
-  const finalAll = reflowSentenceBoundaries(alignedAll).updatedClips;
+  const updatedClips = alignWordsToTargetClips(rawWords, clips);
 
   return {
-    updatedClips: finalAll,
+    updatedClips,
     updatedCount: clips.length,
     matchedRange: { start: 0, end: clips.length - 1 },
     modeUsed: 'full',

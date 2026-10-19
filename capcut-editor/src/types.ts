@@ -438,7 +438,19 @@ declare global {
       toggleMaximize(): Promise<boolean>;
       openSrtFile(): Promise<{ ok: boolean; path?: string; name?: string; entriesCount?: number; error?: string } | null>;
       openTxtFile(): Promise<{ ok: boolean; path?: string; name?: string; text?: string; error?: string } | null>;
-      openAudioFileDialog(): Promise<{ ok: boolean; path?: string; name?: string; duration?: number; hasAudio?: boolean; error?: string } | null>;
+      openAudioFileDialog(): Promise<{ ok: boolean; path?: string; name?: string; duration?: number; hasAudio?: boolean; size?: number; error?: string } | null>;
+      openMultipleAudioFiles(): Promise<Array<{ ok: boolean; path: string; name: string; duration: number; hasAudio: boolean; size: number; error?: string }>>;
+      saveAudioFileDialog(defaultName?: string): Promise<string | null>;
+      mergeAudioFiles(spec: { filePaths: string[]; outputPath?: string }): Promise<{
+        ok: boolean;
+        outputPath?: string;
+        name?: string;
+        duration?: number;
+        size?: number;
+        filesCount?: number;
+        filesInfo?: Array<{ path: string; name: string; duration: number }>;
+        error?: string;
+      }>;
       alignAudioScript(spec: {
         whisperModel?: string;
         audioPath: string;
@@ -559,6 +571,7 @@ export interface ScriptStudioSpec {
   audioOnly?: boolean;
   useVision?: boolean;
   panelPacing?: 'auto' | number;
+  chunkSize?: number;
 }
 
 export interface ScriptStudioResult {
