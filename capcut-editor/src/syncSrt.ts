@@ -7,6 +7,8 @@ export async function runAutoSyncSrt(
   onProgress?: (message: string) => void,
   options: {
     srtPath?: string;
+    srtStartTime?: string | number;
+    srtEndTime?: string | number;
     scriptText?: string;
     scriptPath?: string;
     videoOffset?: number;
@@ -194,6 +196,8 @@ export async function runAutoSyncSrt(
         res = await window.api.syncTimelineSrt({
           videoPath: vMedia.path,
           srtPath,
+          srtStartTime: options.srtStartTime,
+          srtEndTime: options.srtEndTime,
           voicePath: curAMedia.path,
           voiceOffset: curAIn,
           voiceDuration: curADur,

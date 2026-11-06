@@ -147,7 +147,120 @@ function reconstructSentences(entries, options = {}) {
     }
   }
 
+  // De-overlap consecutive blocks (e.g. YouTube 2-line rollup captions where cue[k].end > cue[k+1].start)
+  const byRawId = new Map(entries.map((e) => [e.id, e]));
+  for (let i = 0; i < reconstructed.length; i++) {
+    const cur = reconstructed[i];
+    Object.defineProperty(cur, 'rawStart', { value: cur.start, enumerable: false, configurable: true });
+    Object.defineProperty(cur, 'rawEnd', { value: cur.end, enumerable: false, configurable: true });
+    Object.defineProperty(cur, 'rawDuration', { value: cur.duration, enumerable: false, configurable: true });
+  }
+  for (let i = 0; i < reconstructed.length - 1; i++) {
+    const cur = reconstructed[i];
+    const next = reconstructed[i + 1];
+    if (cur.rawEnd > next.rawStart && next.rawStart > cur.start) {
+      const lastCue = byRawId.get(cur.rawIds?.at(-1));
+      const nextCue = byRawId.get(next.rawIds?.[0]);
+      const secondNextCue = next.rawIds?.[0] !== undefined ? byRawId.get(next.rawIds[0] + 1) : null;
+      const lastSpokenStart = lastCue ? lastCue.start : cur.start;
+      const lastSpokenEnd = lastCue ? Math.min(lastCue.end, next.rawStart) : next.rawStart;
+      let boundary = lastSpokenEnd;
+      if (lastCue && nextCue) {
+        const trimmedLast = lastCue.text.trim();
+        if (!/[.!?…]["'”»)\]]*$/.test(trimmedLast)) {
+          const mLast = trimmedLast.match(/^(.*[.!?…]["'”»)\]]*)\s+\S+.*$/);
+          if (mLast) {
+            const r = mLast[1].length / trimmedLast.length;
+            boundary = lastSpokenStart + r * (lastSpokenEnd - lastSpokenStart);
+          } else {
+            const trimmedNext = nextCue.text.trim();
+            const mNext = trimmedNext.match(/^([^.!?…]+[.!?…]["'”»)\]]*)\s+\S+.*$/);
+            if (mNext && mNext[1].length < trimmedNext.length * 0.65) {
+              const nextSpokenEnd = (secondNextCue && secondNextCue.start > nextCue.start) ? Math.min(nextCue.end, secondNextCue.start) : nextCue.end;
+              const r = mNext[1].length / trimmedNext.length;
+              boundary = nextCue.start + r * (nextSpokenEnd - nextCue.start);
+            }
+          }
+        }
+      }
+      boundary = Math.round(boundary * 1000) / 1000;
+      if (boundary <= cur.start + 0.2 || boundary >= next.rawEnd - 0.2) {
+        boundary = Math.round(next.rawStart * 1000) / 1000;
+      }
+      cur.end = boundary;
+      cur.duration = Math.round((cur.end - cur.start) * 1000) / 1000;
+      next.start = boundary;
+      next.duration = Math.round((next.end - next.start) * 1000) / 1000;
+    }
+  }
+
   return reconstructed;
+}
+
+/**
+ * Format subtitle entries back into standard SRT text.
+ */
+function stringifySrt(entries) {
+  if (!Array.isArray(entries) || !entries.length) return '';
+  return entries
+    .map((e, idx) => {
+      const num = idx + 1;
+      const s = formatTimestamp(e.start);
+      const en = formatTimestamp(e.end);
+      return `${num}\n${s} --> ${en}\n${e.text}\n`;
+    })
+    .join('\n');
+}
+
+/**
+ * Slice subtitle entries starting from startTime (and optional endTime),
+ * and shift all timestamps so that the slice starts at 00:00:00.
+ */
+function sliceAndShiftSrt(entries, startTime, endTime = null) {
+  if (!Array.isArray(entries) || !entries.length) {
+    return { startSec: 0, endSec: null, entries: [] };
+  }
+
+  let startSec = 0;
+  if (typeof startTime === 'number') {
+    startSec = Math.max(0, startTime);
+  } else if (typeof startTime === 'string' && startTime.trim()) {
+    const s = startTime.trim();
+    if (/^\d+(\.\d+)?$/.test(s)) {
+      startSec = parseFloat(s);
+    } else {
+      startSec = parseTimestamp(s.includes(',') || s.includes('.') ? s : `${s},000`);
+    }
+  }
+
+  let endSec = null;
+  if (typeof endTime === 'number') {
+    endSec = endTime > startSec ? endTime : null;
+  } else if (typeof endTime === 'string' && endTime.trim()) {
+    const s = endTime.trim();
+    if (/^\d+(\.\d+)?$/.test(s)) {
+      endSec = parseFloat(s);
+    } else {
+      endSec = parseTimestamp(s.includes(',') || s.includes('.') ? s : `${s},000`);
+    }
+    if (endSec <= startSec) endSec = null;
+  }
+
+  const sliced = entries
+    .filter((e) => e.end > startSec && (!endSec || e.start < endSec))
+    .map((e, idx) => {
+      const shiftedStart = Math.max(0, Math.round((e.start - startSec) * 1000) / 1000);
+      const shiftedEnd = Math.max(0.1, Math.round((e.end - startSec) * 1000) / 1000);
+      return {
+        id: idx + 1,
+        start: shiftedStart,
+        end: shiftedEnd,
+        duration: Math.round((shiftedEnd - shiftedStart) * 1000) / 1000,
+        text: e.text
+      };
+    });
+
+  return { startSec, endSec, entries: sliced };
 }
 
 module.exports = {
@@ -155,5 +268,7 @@ module.exports = {
   formatTimestamp,
   parseSrt,
   parseSrtFile,
-  reconstructSentences
+  reconstructSentences,
+  stringifySrt,
+  sliceAndShiftSrt
 };

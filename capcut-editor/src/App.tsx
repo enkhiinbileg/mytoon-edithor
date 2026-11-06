@@ -14,6 +14,7 @@ import ProjectsModal from './components/ProjectsModal';
 import ScriptStudioModal from './components/ScriptStudioModal';
 import AudioScriptModal from './components/AudioScriptModal';
 import AudioMergerModal from './components/AudioMergerModal';
+import ImageRecapStudioModal from './components/ImageRecapStudioModal';
 import HomeScreen from './components/HomeScreen';
 import { saveProject, openProject, restoreProject, startProjectAutosave, flushDraft, deleteProject } from './project';
 import { importPaths } from './importMedia';
@@ -36,11 +37,13 @@ export default function App() {
   const [scriptStudioOpen, setScriptStudioOpen] = useState(false);
   const [audioScriptOpen, setAudioScriptOpen] = useState(false);
   const [audioMergerOpen, setAudioMergerOpen] = useState(false);
+  const [imageRecapOpen, setImageRecapOpen] = useState(false);
 
   useEffect(() => {
     const handleOpenStudio = () => setScriptStudioOpen(true);
     const handleOpenAudioScript = () => setAudioScriptOpen(true);
     const handleOpenAudioMerger = () => setAudioMergerOpen(true);
+    const handleOpenImageRecap = () => setImageRecapOpen(true);
     const handleOpenAutoSync = () => {
       setTab('text');
       setTimeout(() => {
@@ -50,11 +53,13 @@ export default function App() {
     window.addEventListener('open-script-studio', handleOpenStudio);
     window.addEventListener('open-audio-script', handleOpenAudioScript);
     window.addEventListener('open-audio-merger', handleOpenAudioMerger);
+    window.addEventListener('open-image-recap', handleOpenImageRecap);
     window.addEventListener('open-auto-sync', handleOpenAutoSync);
     return () => {
       window.removeEventListener('open-script-studio', handleOpenStudio);
       window.removeEventListener('open-audio-script', handleOpenAudioScript);
       window.removeEventListener('open-audio-merger', handleOpenAudioMerger);
+      window.removeEventListener('open-image-recap', handleOpenImageRecap);
       window.removeEventListener('open-auto-sync', handleOpenAutoSync);
     };
   }, []);
@@ -499,6 +504,16 @@ export default function App() {
       {audioMergerOpen && (
         <AudioMergerModal
           onClose={() => setAudioMergerOpen(false)}
+        />
+      )}
+      {imageRecapOpen && (
+        <ImageRecapStudioModal
+          isOpen={imageRecapOpen}
+          onClose={() => setImageRecapOpen(false)}
+          onSuccessNotice={(msg) => {
+            setNotice(msg);
+            setTimeout(() => setNotice(null), 6000);
+          }}
         />
       )}
       {notice && <div className="toast" role="status" onClick={()=>setNotice(null)}>{notice}<button className="notice-close" aria-label="Dismiss message" onClick={()=>setNotice(null)}>×</button></div>}

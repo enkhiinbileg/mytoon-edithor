@@ -14,6 +14,8 @@ async function syncTimelineWithSrt(spec, progress) {
     videoPath,
     srtPath,
     srtContent,
+    srtStartTime = 0,
+    srtEndTime = null,
     voicePath,
     voiceOffset = 0,
     voiceDuration = null,
@@ -52,6 +54,19 @@ async function syncTimelineWithSrt(spec, progress) {
 
   if (!rawEnglishSrt.length) {
     throw new Error('Англи SRT хадмал хоосон эсвэл буруу форматтай байна.');
+  }
+
+  // If srtStartTime is provided, slice and shift to 00:00:00!
+  if (srtStartTime) {
+    const origCount = rawEnglishSrt.length;
+    const { startSec, entries } = srtParser.sliceAndShiftSrt(rawEnglishSrt, srtStartTime, srtEndTime);
+    if (entries.length > 0) {
+      rawEnglishSrt = entries;
+      progress?.({
+        stage: 'srt',
+        message: `✂️ SRT-г ${srtStartTime} (${Math.round(startSec)}с)-аас таслав: ${origCount} мөрөөс ${rawEnglishSrt.length} мөр үлдэж 00:00:00 руу зөөгдлөө.`
+      });
+    }
   }
 
   // Intelligently merge 1.5s fragmented YouTube auto-subs into full narrative sentences
@@ -243,15 +258,20 @@ async function syncTimelineWithSrt(spec, progress) {
       // When moving to a new scene, it MUST cut cleanly to the new scene's videoStart.
       if (isSubCutOfSameScene && sStart < lastSourceEnd && (lastSourceEnd - sStart) < 15.0) {
         sStart = lastSourceEnd;
+      } else if (!isSubCutOfSameScene && sStart < lastSourceEnd) {
+        sStart = Math.min(video.duration - 0.5, lastSourceEnd);
       }
 
-      const sEnd = Math.max(sStart + 0.3, Math.min(video.duration - 0.2, align.videoEnd + offsetSec));
+      const nextSceneStart = (nextAlign && nextAlign.matchedSrtId !== align.matchedSrtId && Number.isFinite(nextAlign.videoStart))
+        ? Math.max(sStart + 0.2, nextAlign.videoStart + offsetSec)
+        : Infinity;
+      const sEnd = Math.max(sStart + 0.2, Math.min(video.duration - 0.2, align.videoEnd + offsetSec, nextSceneStart));
 
       // User Option 1B (Default): Pure dynamic video motion!
       // The video plays continuously starting from the exact SRT scene for the full duration
       // of the Mongolian speech, keeping the video completely fluid and animated without freezing.
-      const motionEnd = Math.min(video.duration - 0.05, sStart + cutDur);
-      const actualSourceEnd = (pacingMode === 'freeze') ? sEnd : motionEnd;
+      const motionEnd = Math.min(video.duration - 0.05, sStart + cutDur, nextSceneStart);
+      const actualSourceEnd = (pacingMode === 'freeze') ? sEnd : Math.max(sStart + 0.2, motionEnd);
       const actualSourceDur = actualSourceEnd - sStart;
       lastSourceEnd = actualSourceEnd;
 
@@ -328,6 +348,42 @@ async function syncTimelineWithSrt(spec, progress) {
   };
 }
 
+/**
+ * Preview slicing an SRT file, return sentence reconstructions and formatted text.
+ */
+function sliceSrtPreview(spec = {}) {
+  const { srtPath, srtContent, srtStartTime = 0, srtEndTime = null } = spec;
+  let raw = [];
+  if (srtPath) raw = srtParser.parseSrtFile(srtPath);
+  else if (srtContent) raw = srtParser.parseSrt(srtContent);
+
+  if (!raw.length) {
+    throw new Error('SRT файл хоосон эсвэл олдсонгүй.');
+  }
+
+  const { startSec, endSec, entries } = srtParser.sliceAndShiftSrt(raw, srtStartTime, srtEndTime);
+  const sentences = srtParser.reconstructSentences(entries);
+  const sentencesText = sentences.map((s, idx) => `${idx + 1}. ${s.text}`).join('\n\n');
+  const plainScript = sentences.map((s) => s.text).join(' ');
+  const srtString = srtParser.stringifySrt(entries);
+  const totalDuration = entries.length ? entries[entries.length - 1].end : 0;
+
+  return {
+    ok: true,
+    totalOriginal: raw.length,
+    slicedCount: entries.length,
+    sentencesCount: sentences.length,
+    startSec,
+    endSec,
+    totalDuration,
+    sentences,
+    sentencesText,
+    plainScript,
+    srtString
+  };
+}
+
 module.exports = {
-  syncTimelineWithSrt
+  syncTimelineWithSrt,
+  sliceSrtPreview
 };

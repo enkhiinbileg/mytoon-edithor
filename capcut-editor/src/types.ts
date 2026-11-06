@@ -320,6 +320,35 @@ export type RecapCutResult = {
   report: RecapCutReport;
 } | { ok: false; error: string };
 
+export interface ImagePanelItem {
+  id: string;
+  name: string;
+  path: string;
+  width: number;
+  height: number;
+  isSliced?: boolean;
+  originalPath?: string;
+  panelIndex?: number;
+}
+
+export interface ImagePlanRow {
+  id: string;
+  subtitleId: string;
+  start: number;
+  end: number;
+  duration: number;
+  text: string;
+  panelId: string;
+  imagePath: string;
+  imageWidth: number;
+  imageHeight: number;
+  imageName: string;
+  motion: 'zoom_in' | 'zoom_out' | 'pan_down' | 'pan_up' | 'static';
+  aspect: '16:9' | '9:16';
+  confidence: number;
+  keyframes: Keyframe[];
+}
+
 declare global {
   interface Window {
     api: ProjectApi & {
@@ -351,6 +380,18 @@ declare global {
       readSettings(): Promise<AppSettings>;
       updateSettings(patch: Record<string, unknown>): Promise<AppSettings>;
       getAvailableFonts(): Promise<FontCatalog>;
+      // Image Recap Studio (Voice + Subtitle + Image Panel Sync)
+      openImagesOrFolder(mode?: 'files' | 'folder'): Promise<string[]>;
+      prepareImagePanels(paths: string[], options?: { sliceMode?: 'none' | 'smart' }): Promise<{ ok: boolean; panels?: ImagePanelItem[]; cacheDir?: string; error?: string }>;
+      alignImageRecap(spec: {
+        subtitles: { id: string; start: number; end: number; text: string }[];
+        panels: ImagePanelItem[];
+        audioDuration?: number;
+        aspectRatio?: '16:9' | '9:16';
+        useAi?: boolean;
+        model?: string;
+      }): Promise<{ ok: boolean; plan?: ImagePlanRow[]; error?: string }>;
+      onImageRecapProgress(cb: (p: { stage: string; message: string; percent?: number }) => void): () => void;
       importCustomFonts(): Promise<{ canceled: boolean; imported?: string[]; fonts: FontCatalog }>;
 
       whisperStatus(): Promise<{
@@ -490,6 +531,8 @@ declare global {
         videoPath: string;
         srtPath?: string;
         srtContent?: string;
+        srtStartTime?: string | number;
+        srtEndTime?: string | number;
         voicePath: string;
         voiceOffset?: number;
         voiceDuration?: number;
@@ -499,6 +542,31 @@ declare global {
         pacingMode?: 'freeze' | 'motion' | 'hybrid';
         geminiApiKey?: string;
       }): Promise<{ ok: boolean; cuts?: any[]; nextSourceOffset?: number; error?: string }>;
+      sliceSrtPreview(spec: {
+        srtPath?: string;
+        srtContent?: string;
+        srtStartTime?: string | number;
+        srtEndTime?: string | number;
+      }): Promise<{
+        ok: boolean;
+        totalOriginal?: number;
+        slicedCount?: number;
+        sentencesCount?: number;
+        startSec?: number;
+        endSec?: number;
+        totalDuration?: number;
+        sentences?: any[];
+        sentencesText?: string;
+        plainScript?: string;
+        srtString?: string;
+        error?: string;
+      }>;
+      saveTextFileDialog(spec: {
+        defaultName?: string;
+        content: string;
+        filterName?: string;
+        extension?: string;
+      }): Promise<{ ok: boolean; path?: string } | null>;
       autoCutBySrt(spec: {
         srtPath: string;
         srtContent?: string;

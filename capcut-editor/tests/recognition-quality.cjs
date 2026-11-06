@@ -105,3 +105,25 @@ test('PCM parser handles metadata chunks and rejects compressed/malformed audio'
   assert.equal(readWaveActivity(extended).duration, 2);
   assert.throws(() => readWaveActivity(Buffer.from('bad')), /PCM WAV/);
 });
+
+test('2-second quantized Whisper segment end on 3.35s tail chunk does not falsely reject valid words', async () => {
+  const words = [
+    { word: 'Тоддан', start: 0, end: 0.16 },
+    { word: 'досохаар', start: 0.16, end: 0.58 },
+    { word: 'худлэлээ.', start: 0.58, end: 1.36 },
+    { word: 'Эхний', start: 1.5, end: 1.94 },
+    { word: 'цүм', start: 1.94, end: 2.22 },
+    { word: 'төөггөө', start: 2.22, end: 2.78 },
+    { word: 'бодров.', start: 2.78, end: 3.28 }
+  ];
+  const segments = [
+    { start: 0, end: 2, text: 'Тоддан досохаар худлэлээ.' },
+    { start: 2, end: 4, text: 'Эхний цүм төөггөө бодров.' }
+  ];
+  const result = await recognizeWithRecovery({ start: 2997.65, duration: 3.35 }, {
+    readAudio: async () => wave(3.35),
+    recognize: async () => ({ words, segments })
+  });
+  assert.deepEqual(result.map(w => w.word), words.map(w => w.word));
+  assert.ok(result.every(w => w.start >= 0 && w.end <= 3.35));
+});

@@ -35,6 +35,40 @@ fs.mkdirSync(OVERLAY_DIR, { recursive: true });
 
 let activeExportProcess = null;
 
+let cachedFilterScriptOption = null;
+function getFilterComplexScriptOption() {
+  if (cachedFilterScriptOption) return cachedFilterScriptOption;
+  try {
+    const { spawnSync } = require('node:child_process');
+    const res = spawnSync(FFMPEG, ['-filter_complex_script'], { windowsHide: true });
+    const err = (res.stderr || '').toString();
+    if (err.includes("Unrecognized option 'filter_complex_script'")) {
+      cachedFilterScriptOption = '-/filter_complex';
+    } else {
+      cachedFilterScriptOption = '-filter_complex_script';
+    }
+  } catch {
+    cachedFilterScriptOption = '-/filter_complex';
+  }
+  return cachedFilterScriptOption;
+}
+
+function appendFilterComplex(args, graphString, tempFiles) {
+  // If the filter graph is short (< 4000 chars), inline syntax is fast and has no disk I/O.
+  // When a timeline has many clips, overlays, or keyframe expressions, the serialized graph
+  // easily exceeds Windows' 32,767 character command-line limit (causing Node spawn ENAMETOOLONG).
+  // In those cases, write the filter graph to a temporary script file and pass it to FFmpeg.
+  if (graphString.length < 4000) {
+    args.push('-filter_complex', graphString);
+    return;
+  }
+  const scriptPath = path.join(os.tmpdir(), `ff_graph_${process.pid}_${crypto.randomBytes(6).toString('hex')}.txt`);
+  fs.writeFileSync(scriptPath, graphString, 'utf8');
+  if (tempFiles) tempFiles.push(scriptPath);
+  const opt = getFilterComplexScriptOption();
+  args.push(opt, scriptPath);
+}
+
 function cancelExport() {
   if (activeExportProcess) {
     try {
@@ -601,7 +635,8 @@ async function exportTimeline(spec, onProgress) {
     const bitrate = spec.audioBitrate || (spec.quality === 'high' ? '320k' : spec.quality === 'draft' ? '128k' : '192k');
     graph.push(sounds.join('') + 'amix=inputs=' + sounds.length + ':normalize=0:duration=first,atrim=duration=' + fx(duration) + '[aout]');
 
-    args.push('-filter_complex', graph.join(';'), '-map', '[aout]', '-t', String(duration));
+    appendFilterComplex(args, graph.join(';\n'), tempFiles);
+    args.push('-map', '[aout]', '-t', String(duration));
     if (isWav) {
       args.push('-c:a', 'pcm_s16le');
     } else if (isAac) {
@@ -886,7 +921,8 @@ async function exportTimeline(spec, onProgress) {
     if (!copySequenceVideo && !directGpuVideo) graph.push(vCurrent+'format=yuv420p[vout]');
     graph.push(sounds.join('')+'amix=inputs='+sounds.length+':normalize=0:duration=first,atrim=duration='+fx(duration)+'[aout]');
 
-    args.push('-filter_complex', graph.join(';'), '-map', copySequenceVideo || directGpuVideo ? vCurrent : '[vout]', '-map', '[aout]', '-t', String(duration));
+    appendFilterComplex(args, graph.join(';\n'), tempFiles);
+    args.push('-map', copySequenceVideo || directGpuVideo ? vCurrent : '[vout]', '-map', '[aout]', '-t', String(duration));
     const encodingArgs = videoEncodingArgs(spec, encoder);
     if (directGpuVideo) encodingArgs.splice(encodingArgs.indexOf('-pix_fmt'), 2);
     args.push(...(copySequenceVideo ? ['-c:v', 'copy'] : encodingArgs));

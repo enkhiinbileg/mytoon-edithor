@@ -74,6 +74,33 @@ assert.equal(stitched[0].text, 'Gungnir is the John Wick of his story, maintaini
 assert.equal(stitched[1].start, 7.8);
 assert.equal(stitched[1].end, 10.0);
 assert.equal(stitched[1].text, 'But surprisingly, he became a student.');
+
+const rollupSrt = `
+1
+00:00:00,000 --> 00:00:03,480
+The story begins in a green field with
+
+2
+00:00:01,920 --> 00:00:05,400
+two guys standing along with some little
+
+3
+00:00:03,480 --> 00:00:07,320
+creatures. The guy raises a flag and
+
+4
+00:00:05,400 --> 00:00:09,240
+says, "My name is Suho Kim." The little
+
+5
+00:00:07,320 --> 00:00:11,320
+creatures are all there saying nonsense.
+`;
+const stitchedRollup = srtParser.reconstructSentences(srtParser.parseSrt(rollupSrt));
+assert.equal(stitchedRollup.length, 2);
+assert.equal(stitchedRollup[0].start, 0.0);
+assert.equal(stitchedRollup[0].end, stitchedRollup[1].start, 'Consecutive rollup blocks must not overlap');
+assert.ok(stitchedRollup[0].end <= 7.32 && stitchedRollup[0].end >= 6.5, 'First block ends at sentence boundary before next cue');
 console.log('✓ Sentence Reconstruction passed with 100% accuracy.');
 
 console.log('ALL SRT-SYNC UNIT TESTS PASSED!');

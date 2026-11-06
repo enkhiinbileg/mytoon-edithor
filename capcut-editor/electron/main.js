@@ -819,7 +819,7 @@ ipcMain.handle('audio:mergeFiles', async (_e, { filePaths, outputPath }) => {
 let captionController = null;
 ipcMain.handle('audio:cancelAlign', () => { captionController?.abort(); return true; });
 ipcMain.handle('audio:alignScript', async (_e, spec) => {
-  if (captionController) return { ok: false, error: 'Хадмал үүсгэх ажил ажиллаж байна.' };
+  if (captionController) return { ok: false, busy: true, error: 'Хадмал үүсгэх ажил ажиллаж байна.' };
   captionController = new AbortController();
   try {
     return await audioScriptAlign.alignAudioWithScript({ ...spec, signal: captionController.signal }, (p) => win?.webContents.send('voice-align:progress', p));
@@ -874,6 +874,32 @@ ipcMain.handle('srt:sync', async (_e, spec) => {
   }
 });
 
+ipcMain.handle('srt:slicePreview', async (_e, spec) => {
+  try {
+    return srtSync.sliceSrtPreview(spec);
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+});
+
+ipcMain.handle('dialog:saveTextFile', async (_e, { defaultName, content, filterName = 'Text Files', extension = 'txt' }) => {
+  try {
+    const res = await dialog.showSaveDialog(win, {
+      title: 'Файл хадгалах',
+      defaultPath: path.join(app.getPath('downloads'), defaultName || `export.${extension}`),
+      filters: [
+        { name: `${filterName} (*.${extension})`, extensions: [extension] },
+        { name: 'All Files (*.*)', extensions: ['*'] }
+      ]
+    });
+    if (res.canceled || !res.filePath) return null;
+    fs.writeFileSync(res.filePath, content, 'utf8');
+    return { ok: true, path: res.filePath };
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+});
+
 const recapAutoCut = require('./recap-auto-cut');
 const activeRecapCuts = new Set();
 ipcMain.handle('recap:autoCutBySrt', async (_e, spec) => {
@@ -892,6 +918,8 @@ ipcMain.handle('recap:autoCutBySrt', async (_e, spec) => {
     apiKey = settings.secret('geminiApiKey');
     return await recapAutoCut.autoCutByEnglishSrt({
       srtPath: spec.srtPath,
+      srtStartTime: spec.srtStartTime,
+      srtEndTime: spec.srtEndTime,
       captions: spec.captions,
       projectData: spec.projectData,
       videoMediaId: spec.videoMediaId,
@@ -1039,6 +1067,58 @@ ipcMain.handle('script:mergeRecovery', async (_e, spec) => {
 
 ipcMain.handle('fonts:getAvailable', () => fontManager.getAvailableFonts(app));
 ipcMain.handle('fonts:importCustom', () => fontManager.importCustomFonts(app, dialog, win));
+
+const imageSlicer = require('./image-slicer');
+const imageMatcher = require('./image-subtitle-matcher');
+
+ipcMain.handle('dialog:openImagesOrFolder', async (_e, mode = 'files') => {
+  const isFolder = mode === 'folder';
+  const res = await dialog.showOpenDialog(win, {
+    title: isFolder ? 'Зургийн хавтас сонгох' : 'Зурагнууд сонгох (Ctrl/Shift дарж олноор сонгож болно)',
+    filters: [
+      { name: 'Images (*.png, *.jpg, *.jpeg, *.webp, *.bmp)', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'] },
+      { name: 'All Files (*.*)', extensions: ['*'] }
+    ],
+    properties: isFolder ? ['openDirectory'] : ['openFile', 'multiSelections']
+  });
+  if (res.canceled || !res.filePaths?.length) return [];
+  return res.filePaths;
+});
+
+ipcMain.handle('image-recap:preparePanels', async (_e, inputPaths, options = {}) => {
+  try {
+    const onProgress = (msg) => {
+      win?.webContents.send('image-recap:progress', { stage: 'slicing', message: msg });
+    };
+    const sliceMode = options?.sliceMode || 'none';
+    const result = await imageSlicer.prepareImageCollection(inputPaths, { sliceMode, onProgress });
+    return { ok: true, panels: result.panels, cacheDir: result.cacheDir };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('image-recap:align', async (_e, spec) => {
+  try {
+    const geminiKey = settings.secret('geminiApiKey');
+    const onProgress = (msg, percent) => {
+      win?.webContents.send('image-recap:progress', { stage: 'matching', message: msg, percent });
+    };
+    const plan = await imageMatcher.alignImagesToSubtitles({
+      subtitles: spec.subtitles,
+      panels: spec.panels,
+      audioDuration: spec.audioDuration,
+      aspectRatio: spec.aspectRatio || '16:9',
+      useAi: spec.useAi !== false,
+      apiKey: geminiKey,
+      model: spec.model || 'gemini-3.8-flash',
+      onProgress
+    });
+    return { ok: true, plan };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
 
 ipcMain.handle('window:minimize', () => win?.minimize());
 ipcMain.handle('window:toggleMaximize', () => {

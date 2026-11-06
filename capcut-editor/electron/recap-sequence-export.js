@@ -71,6 +71,25 @@ function frameCount(ffprobe, filePath) {
   });
 }
 
+function videoStreamDuration(ffprobe, filePath) {
+  return new Promise((resolve) => {
+    execFile(ffprobe, ['-v', 'error', '-select_streams', 'v:0',
+      '-show_entries', 'stream=duration:format=duration', '-of', 'json', filePath],
+    { windowsHide: true, timeout: 30000, maxBuffer: 1024 * 1024 }, (error, stdout) => {
+      if (error) return resolve(null);
+      try {
+        const parsed = JSON.parse(stdout);
+        const streamDur = Number(parsed.streams?.[0]?.duration);
+        if (Number.isFinite(streamDur) && streamDur > 0) return resolve(streamDur);
+        const formatDur = Number(parsed.format?.duration);
+        resolve(Number.isFinite(formatDur) && formatDur > 0 ? formatDur : null);
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+}
+
 /**
  * Normalize at most eight inputs at a time, then expose identical H.264 streams
  * to the concat demuxer. Mixing image packets and source-video packets directly
@@ -81,11 +100,18 @@ async function normalizeSimpleSequence({ clips, width, height, fps, duration,
   workDir, ffmpeg, ffprobe, onProcess, onProgress, encodeArgs, overlays = [] }) {
   if (!isSimpleMutedSequence(clips)) throw new Error('Only simple muted sequences can use bounded normalization.');
   const totalFrames = Math.ceil(duration * fps - 1e-7);
+  const contiguousTolerance = Math.min(1e-3, 0.25 / fps);
   const segments = [];
   let cursor = 0;
+  let previousEnd = 0;
   for (const clip of [...clips].sort((a, b) => a.start - b.start)) {
     if (clip.start >= duration) break;
-    const startFrame = Math.max(cursor, Math.min(totalFrames, Math.round(clip.start * fps)));
+    // Keep abutting clips sharing a half-frame boundary on the same frame index
+    // instead of rounding in opposite directions and inserting a 1-frame black gap.
+    const contiguous = cursor > 0 && Math.abs(clip.start - previousEnd) <= contiguousTolerance;
+    const startFrame = contiguous
+      ? cursor
+      : Math.max(cursor, Math.min(totalFrames, Math.round(clip.start * fps)));
     const clipEnd = Math.min(duration, clip.start + clip.outPoint - clip.inPoint);
     const endFrame = clipEnd >= duration - 1e-7 ? totalFrames : Math.round(clipEnd * fps);
     if (startFrame > cursor) segments.push({ frames: startFrame - cursor });
@@ -94,9 +120,17 @@ async function normalizeSimpleSequence({ clips, width, height, fps, duration,
         sourceDuration: clipEnd - clip.start });
     }
     cursor = Math.max(cursor, endFrame);
+    previousEnd = Math.max(previousEnd, clipEnd);
   }
   if (cursor < totalFrames) segments.push({ frames: totalFrames - cursor });
   if (!segments.length) throw new Error('Sequence contains no output frames.');
+
+  const uniqueVideoSources = [...new Set(
+    segments.map(s => s.clip).filter(c => c && c.kind !== 'image').map(c => c.src)
+  )];
+  const videoDurations = new Map(
+    await Promise.all(uniqueVideoSources.map(async src => [src, await videoStreamDuration(ffprobe, src)]))
+  );
 
   await fs.mkdir(workDir, { recursive: true });
   const lines = ['ffconcat version 1.0'];
@@ -118,27 +152,35 @@ async function normalizeSimpleSequence({ clips, width, height, fps, duration,
       const seconds = frames / fps;
       expected += frames;
       if (!clip) {
-        args.push('-f', 'lavfi', '-i', `color=c=black:s=${width}x${height}:r=${fps}:d=${seconds}`);
-      } else if (clip.kind === 'image') {
-        // Decode and resize a held frame once; reuse it in the filter graph.
-        args.push('-threads', '1', '-i', clip.src);
-      } else {
-        args.push('-threads', '1', '-ss', String(clip.inPoint), '-t', String(sourceDuration), '-i', clip.src);
-      }
-      const fit = clip?.fitMode === 'cover'
-        ? `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`
-        : `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`;
-      if (clip?.kind === 'image') {
-        filters.push(`[${index}:v]${fit},setsar=1,format=yuv420p,loop=loop=-1:size=1:start=0,` +
-          `settb=1/${fps},setpts=N,fps=${fps},trim=end_frame=${frames},setpts=N/(${fps}*TB)[v${index}]`);
+        args.push('-f', 'lavfi', '-i', `color=c=black:s=${width}x${height}:r=${fps}:d=${(frames + 1) / fps}`);
+        filters.push(`[${index}:v]setsar=1,format=yuv420p,trim=end_frame=${frames},settb=1/${fps},setpts=N[v${index}]`);
         return;
       }
-      // A maximum one-frame pad only resolves decode/CFR boundary quantization.
+      const fit = clip.fitMode === 'cover'
+        ? `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`
+        : `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`;
+      if (clip.kind === 'image') {
+        // Decode and resize a held frame once; reuse it in the filter graph.
+        args.push('-threads', '1', '-i', clip.src);
+        filters.push(`[${index}:v]${fit},setsar=1,format=yuv420p,loop=loop=-1:size=1:start=0,` +
+          `settb=1/${fps},setpts=N,fps=${fps},trim=end_frame=${frames},settb=1/${fps},setpts=N[v${index}]`);
+        return;
+      }
+      const vidDur = videoDurations.get(clip.src);
+      const safeInPoint = (Number.isFinite(vidDur) && vidDur > 0)
+        ? Math.max(0, Math.min(clip.inPoint, Math.max(0, vidDur - 2 / fps)))
+        : clip.inPoint;
+      const readDuration = Math.max(sourceDuration, seconds) + Math.max(0, clip.inPoint - safeInPoint) + 2 / fps;
+      args.push('-threads', '1', '-ss', String(safeInPoint), '-t', String(readDuration), '-i', clip.src);
+      // Clone-pad up to the target frame count so early video-stream EOF or boundary rounding never drops frames.
       filters.push(`[${index}:v]setpts=PTS-STARTPTS,${fit},setsar=1,fps=${fps},` +
-        `tpad=stop_mode=clone:stop_duration=${1 / fps},trim=end_frame=${frames},` +
-        `setpts=N/(${fps}*TB),format=yuv420p[v${index}]`);
+        `tpad=stop_mode=clone:stop=${frames},trim=end_frame=${frames},` +
+        `settb=1/${fps},setpts=N,format=yuv420p[v${index}]`);
     });
-    filters.push(chunk.map((_, index) => `[v${index}]`).join('') + `concat=n=${chunk.length}:v=1:a=0[sequence]`);
+    // Re-stamp frame-accurate PTS after concat: FFmpeg's concat filter advances delta_ts by 0
+    // on 1-frame segments (colliding PTS with the next segment) and rescales TB to AV_TIME_BASE.
+    filters.push(chunk.map((_, index) => `[v${index}]`).join('') +
+      `concat=n=${chunk.length}:v=1:a=0,settb=1/${fps},setpts=N[sequence]`);
     let outputLabel = '[sequence]';
     // Snap captions on the global frame grid BEFORE subtracting the batch start.
     // This preserves subtitle boundaries across fractional clip cuts.
@@ -150,9 +192,8 @@ async function normalizeSimpleSequence({ clips, width, height, fps, duration,
       const manifest = prepareOverlaySequence({ overlays: localOverlays, width, height, fps,
         duration: expected / fps, workDir: path.join(workDir, `captions-${offset}`) });
       args.push('-threads', '1', '-f', 'concat', '-safe', '0', '-i', manifest);
-      filters.push(`[${chunk.length}:v]format=rgba,fps=${fps},settb=AVTB[captions]`);
-      filters.push(`[sequence]fps=${fps},settb=AVTB[base]`);
-      filters.push('[base][captions]overlay=x=0:y=0:eof_action=pass:repeatlast=0[vout]');
+      filters.push(`[${chunk.length}:v]format=rgba,fps=${fps},settb=1/${fps},setpts=N[captions]`);
+      filters.push(`[sequence][captions]overlay=x=0:y=0:eof_action=pass:repeatlast=0,settb=1/${fps},setpts=N[vout]`);
       outputLabel = '[vout]';
     }
     const output = path.join(workDir, `chunk-${Math.floor(offset / 8)}.mp4`);

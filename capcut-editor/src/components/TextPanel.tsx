@@ -87,6 +87,7 @@ export default function TextPanel() {
   const [generating, setGenerating] = useState(false);
   const [genStatus, setGenStatus] = useState('');
   const captionGeneration = useRef(0);
+  const captionBusyRef = useRef(false);
   const [captionScript, setCaptionScript] = useState('');
   const [captionModels, setCaptionModels] = useState<{id:string;label:string;mb:number;installed:boolean}[]>([]);
   const [captionModel, setCaptionModel] = useState('groq-whisper-large-v3');
@@ -285,6 +286,20 @@ export default function TextPanel() {
   // Recap Auto-Cut state
   const [srtPath, setSrtPath] = useState('');
   const [srtFileName, setSrtFileName] = useState('');
+  const [srtStartTime, setSrtStartTime] = useState<string>('');
+
+  useEffect(() => {
+    if (srtStartTime) return;
+    const vClip = videoClips[0];
+    if (vClip) {
+      const med = media.find((m) => m.id === vClip.mediaId);
+      const nameOrPath = med?.name || med?.path || '';
+      const match = nameOrPath.match(/\[(\d{1,2})-(\d{2})-(\d{2})_/);
+      if (match) {
+        setSrtStartTime(`${match[1].padStart(2, '0')}:${match[2]}:${match[3]}`);
+      }
+    }
+  }, [videoClips, media]);
   const [autoCutting, setAutoCutting] = useState<boolean>(false);
   const [autoCutStatus, setAutoCutStatus] = useState<string>('');
   const [autoCutSuccess, setAutoCutSuccess] = useState<string>('');
@@ -372,6 +387,7 @@ export default function TextPanel() {
 
       const res = await window.api.autoCutBySrt({
         srtPath,
+        srtStartTime: srtStartTime.trim() || undefined,
         captions: validCaptions,
         projectData: projectDoc,
         requestId
@@ -412,7 +428,8 @@ export default function TextPanel() {
 
   // CapCut 1-Click Auto Caption Generator
   const handleOneClickAutoCaption = async () => {
-    if (generating) return;
+    if (captionBusyRef.current || generating) return;
+    captionBusyRef.current = true;
     const original = useEditor.getState();
     const fingerprint = JSON.stringify(original.snapshotProject());
     const request = ++captionGeneration.current;
@@ -477,10 +494,11 @@ export default function TextPanel() {
         noise: '-30dB',
         useWhisper: true,
         mode: captionScript.trim() ? 'script_captions' : 'auto',
-        forceFresh: true
+        forceFresh: false
       } as any);
 
       if (!isCurrentRequest()) return;
+      if (res?.busy) return;
       if (!res || !res.ok || !res.segments || res.segments.length === 0) {
         throw new Error(res?.error || 'Хадмал үүсгэж чадсангүй.');
       }
@@ -541,6 +559,7 @@ export default function TextPanel() {
         alert('Алдаа: ' + (err.message || String(err)));
       }
     } finally {
+      captionBusyRef.current = false;
       unsubscribe?.();
       if (isCurrentRequest()) {
         setGenerating(false);
@@ -1809,6 +1828,49 @@ export default function TextPanel() {
               >
                 📁 Англи SRT сонгох...
               </button>
+            </div>
+
+            {/* SRT Start Time / Offset Input */}
+            <div style={{ background: '#141418', padding: '8px 10px', borderRadius: 6, marginBottom: 10, border: '1px solid #27272a' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                <span style={{ fontSize: 11, fontWeight: 600, color: '#facc15' }}>
+                  ⏱️ Үргэлжлэл видеоны эхлэх цаг (Offset):
+                </span>
+                <span style={{ fontSize: 10, color: '#71717a' }}>
+                  Жишээ: 01:20:03
+                </span>
+              </div>
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                <input
+                  type="text"
+                  placeholder="00:00:00 (Бүтэн бичлэг бол 0)"
+                  value={srtStartTime}
+                  onChange={(e) => setSrtStartTime(e.target.value)}
+                  disabled={autoCutting}
+                  style={{
+                    flex: 1,
+                    padding: '5px 8px',
+                    fontSize: 11,
+                    backgroundColor: '#1c1c22',
+                    border: '1px solid #3f3f46',
+                    borderRadius: 4,
+                    color: '#fff'
+                  }}
+                />
+                {srtStartTime && (
+                  <button
+                    type="button"
+                    onClick={() => setSrtStartTime('')}
+                    style={{ fontSize: 10, padding: '4px 6px', background: '#27272a', border: '1px solid #3f3f46', borderRadius: 4, color: '#a1a1aa', cursor: 'pointer' }}
+                    title="Цэвэрлэх"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+              <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 4 }}>
+                {srtStartTime ? `✂️ Англи SRT-г ${srtStartTime} цагаас эхлүүлэн 00:00:00 болгож зүснэ.` : 'Хэрэв өмнөх ангийн дундаас тасалсан бичлэг бол эхлэх цагийг нь оруулна.'}
+              </div>
             </div>
 
             {tracks.find(t => t.id === 'v1')?.locked && (

@@ -238,14 +238,22 @@ async function transcribeWithGroq(mediaPath, { language = 'mn', onProgress, sign
     })).digest('hex');
     const chunkCacheFile = path.join(cacheDir, `groq-chunk-${chunkCacheKey}.json`);
 
+    const contentHash = require('node:crypto').createHash('sha256').update(fileBuffer).digest('hex');
+    const contentCacheFile = path.join(cacheDir, `groq-chunk-content-${contentHash}-${lang}.json`);
+
     let data = null;
-    if (!forceFresh && fs.existsSync(chunkCacheFile)) {
-      try {
-        const cached = JSON.parse(fs.readFileSync(chunkCacheFile, 'utf8'));
-        if (cached && (Array.isArray(cached.words) || Array.isArray(cached.segments))) {
-          data = cached;
+    if (!forceFresh) {
+      for (const cf of [contentCacheFile, chunkCacheFile]) {
+        if (fs.existsSync(cf)) {
+          try {
+            const cached = JSON.parse(fs.readFileSync(cf, 'utf8'));
+            if (cached && (Array.isArray(cached.words) || Array.isArray(cached.segments))) {
+              data = cached;
+              break;
+            }
+          } catch {}
         }
-      } catch {}
+      }
     }
 
     if (!data) {
@@ -279,7 +287,10 @@ async function transcribeWithGroq(mediaPath, { language = 'mn', onProgress, sign
           data = await res.json();
           currentKeyIndex = (currentKeyIndex + attempt) % keys.length;
           success = true;
-          try { fs.writeFileSync(chunkCacheFile, JSON.stringify(data)); } catch {}
+          try {
+            fs.writeFileSync(chunkCacheFile, JSON.stringify(data));
+            fs.writeFileSync(contentCacheFile, JSON.stringify(data));
+          } catch {}
           break;
         }
 

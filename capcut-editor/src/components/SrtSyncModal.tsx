@@ -21,6 +21,80 @@ export default function SrtSyncModal({ isOpen, onClose, onSuccessNotice }: Props
   const [scriptTxtName, setScriptTxtName] = useState<string>('');
 
   const [videoOffset, setVideoOffset] = useState<number>(0);
+  const [srtStartTime, setSrtStartTime] = useState<string>('');
+  const [srtEndTime, setSrtEndTime] = useState<string>('');
+  const [sliceResult, setSliceResult] = useState<{
+    slicedCount: number;
+    sentencesCount: number;
+    startSec: number;
+    totalDuration: number;
+    sentencesText: string;
+    plainScript: string;
+    srtString: string;
+    firstSentences?: string[];
+  } | null>(null);
+  const [sliceLoading, setSliceLoading] = useState<boolean>(false);
+
+  const handlePreviewSlice = async () => {
+    if (!srtPath) return;
+    setSliceLoading(true);
+    setErrorMsg('');
+    try {
+      const res = await window.api.sliceSrtPreview({
+        srtPath,
+        srtStartTime: srtStartTime.trim() || 0,
+        srtEndTime: srtEndTime.trim() || undefined
+      });
+      if (res && res.ok) {
+        setSliceResult({
+          slicedCount: res.slicedCount || 0,
+          sentencesCount: res.sentencesCount || 0,
+          startSec: res.startSec || 0,
+          totalDuration: res.totalDuration || 0,
+          sentencesText: res.sentencesText || '',
+          plainScript: res.plainScript || '',
+          srtString: res.srtString || '',
+          firstSentences: (res.sentences || []).slice(0, 3).map((s: any) => s.text)
+        });
+      } else {
+        setErrorMsg(res?.error || 'Хадмалыг зүсэхэд алдаа гарлаа.');
+      }
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Хадмалыг зүсэхэд алдаа гарлаа.');
+    } finally {
+      setSliceLoading(false);
+    }
+  };
+
+  const handleCopyScript = async () => {
+    if (!sliceResult?.sentencesText) return;
+    try {
+      await navigator.clipboard.writeText(sliceResult.sentencesText);
+      setStatusMsg('📋 Англи өгүүлбэрүүдийг clipboard-д хууллаа! Орчуулагч дээр буулгаж болно.');
+      setTimeout(() => setStatusMsg(''), 4000);
+    } catch {
+      setErrorMsg('Clipboard-д хуулж чадсангүй.');
+    }
+  };
+
+  const handleSaveSlicedSrt = async () => {
+    if (!sliceResult?.srtString) return;
+    try {
+      const defName = (srtName || 'part2').replace(/\.srt$/i, '') + `_from_${srtStartTime.replace(/[:.]/g, '_') || '0'}.srt`;
+      const res = await window.api.saveTextFileDialog({
+        defaultName: defName,
+        content: sliceResult.srtString,
+        filterName: 'SRT Subtitles',
+        extension: 'srt'
+      });
+      if (res && res.ok) {
+        setStatusMsg(`💾 Зүссэн 00:00:00 SRT хадгалагдлаа: ${res.path?.split(/[\\/]/).pop()}`);
+        setTimeout(() => setStatusMsg(''), 4000);
+      }
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'SRT хадгалахад алдаа гарлаа.');
+    }
+  };
   const [includeAllAudio, setIncludeAllAudio] = useState<boolean>(true);
 
   const [busy, setBusy] = useState<boolean>(false);
@@ -94,6 +168,8 @@ export default function SrtSyncModal({ isOpen, onClose, onSuccessNotice }: Props
         },
         {
           srtPath,
+          srtStartTime: srtStartTime.trim() || undefined,
+          srtEndTime: srtEndTime.trim() || undefined,
           scriptText: scriptText.trim(),
           scriptPath: scriptTxtPath,
           videoOffset,
@@ -227,6 +303,151 @@ export default function SrtSyncModal({ isOpen, onClose, onSuccessNotice }: Props
                 {srtName ? `✓ ${srtName} (${srtEntriesCount} мөр)` : 'Файл сонгогдоогүй байна'}
               </div>
             </div>
+
+            {/* Srt Slice and Shift Controls */}
+            {srtPath && (
+              <div
+                style={{
+                  marginTop: 6,
+                  padding: '10px 12px',
+                  backgroundColor: '#1f1f23',
+                  border: '1px solid #3f3f46',
+                  borderRadius: 8,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 8
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontSize: 11, fontWeight: 600, color: '#facc15' }}>
+                    ✂️ Үргэлжлэл видеоны эхлэх цаг (SRT таслах & 00:00:00 болгох):
+                  </span>
+                  <span style={{ fontSize: 10, color: '#a1a1aa' }}>
+                    Жишээ нь: 02:00:08 эсвэл 7208
+                  </span>
+                </div>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1 }}>
+                    <span style={{ fontSize: 11, color: '#94a3b8' }}>Эхлэх:</span>
+                    <input
+                      type="text"
+                      placeholder="02:00:08 (хоосон бол 0)"
+                      value={srtStartTime}
+                      onChange={(e) => {
+                        setSrtStartTime(e.target.value);
+                        setSliceResult(null);
+                      }}
+                      disabled={busy}
+                      style={{
+                        flex: 1,
+                        padding: '5px 8px',
+                        fontSize: 11,
+                        backgroundColor: '#111',
+                        border: '1px solid #333',
+                        borderRadius: 4,
+                        color: '#fff'
+                      }}
+                    />
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1 }}>
+                    <span style={{ fontSize: 11, color: '#94a3b8' }}>Дуусах:</span>
+                    <input
+                      type="text"
+                      placeholder="Хязгааргүй (төгсгөл)"
+                      value={srtEndTime}
+                      onChange={(e) => {
+                        setSrtEndTime(e.target.value);
+                        setSliceResult(null);
+                      }}
+                      disabled={busy}
+                      style={{
+                        flex: 1,
+                        padding: '5px 8px',
+                        fontSize: 11,
+                        backgroundColor: '#111',
+                        border: '1px solid #333',
+                        borderRadius: 4,
+                        color: '#fff'
+                      }}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handlePreviewSlice}
+                    disabled={busy || sliceLoading}
+                    style={{
+                      padding: '5px 12px',
+                      fontSize: 11,
+                      backgroundColor: '#3b82f6',
+                      color: '#fff',
+                      border: 'none',
+                      borderRadius: 4,
+                      cursor: 'pointer',
+                      whiteSpace: 'nowrap'
+                    }}
+                  >
+                    {sliceLoading ? 'Уншиж байна...' : '🔍 Тооцоолох'}
+                  </button>
+                </div>
+
+                {/* Slice Results & Quick Actions */}
+                {sliceResult && (
+                  <div
+                    style={{
+                      marginTop: 4,
+                      padding: '8px 10px',
+                      backgroundColor: '#18181b',
+                      border: '1px solid #27272a',
+                      borderRadius: 6,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 6
+                    }}
+                  >
+                    <div style={{ fontSize: 11, color: '#4ade80', fontWeight: 500 }}>
+                      ✓ {sliceResult.slicedCount} мөр хадмал ({sliceResult.sentencesCount} өгүүлбэр, ~{Math.round(sliceResult.totalDuration / 60)} мин) үлдэж 00:00:00 цаг руу зөөгдлөө.
+                    </div>
+                    {sliceResult.firstSentences && sliceResult.firstSentences.length > 0 && (
+                      <div style={{ fontSize: 10, color: '#cbd5e1', fontStyle: 'italic', maxHeight: 40, overflow: 'hidden' }}>
+                        Эхлэл: "{sliceResult.firstSentences[0]}"
+                      </div>
+                    )}
+                    <div style={{ display: 'flex', gap: 8, marginTop: 2 }}>
+                      <button
+                        type="button"
+                        onClick={handleCopyScript}
+                        style={{
+                          padding: '4px 8px',
+                          fontSize: 10,
+                          backgroundColor: '#27272a',
+                          border: '1px solid #3f3f46',
+                          borderRadius: 4,
+                          color: '#38bdf8',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        📋 Англи скриптийг хуулах (Орчуулгад)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleSaveSlicedSrt}
+                        style={{
+                          padding: '4px 8px',
+                          fontSize: 10,
+                          backgroundColor: '#27272a',
+                          border: '1px solid #3f3f46',
+                          borderRadius: 4,
+                          color: '#a7f3d0',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        💾 00:00:00 болгосон SRT хадгалах
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Step 2: Mongolian Script */}

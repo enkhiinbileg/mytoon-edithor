@@ -9,14 +9,32 @@ const hash = text => crypto.createHash('sha256').update(text).digest('hex');
 function createCheckpoint(directory, input, progress) {
   const job = hash(JSON.stringify(input));
   const root = directory ? path.join(directory, job) : null;
+  let legacyRoot = null;
+  if (directory && Array.isArray(input?.englishSrt) && input.englishSrt.some(s => s && (s.rawEnd !== undefined || s.rawStart !== undefined))) {
+    const legacyInput = {
+      ...input,
+      englishSrt: input.englishSrt.map(s => ({
+        ...s,
+        start: s.rawStart ?? s.start,
+        end: s.rawEnd ?? s.end,
+        duration: s.rawDuration ?? s.duration
+      }))
+    };
+    const legacyJob = hash(JSON.stringify(legacyInput));
+    if (legacyJob !== job) legacyRoot = path.join(directory, legacyJob);
+  }
   let warned = false;
+  const readFrom = (dir, promptHash) => {
+    try {
+      const item = JSON.parse(fs.readFileSync(path.join(dir, `${promptHash}.json`), 'utf8'));
+      return typeof item.text === 'string' && item.checksum === hash(item.text) ? item.text : null;
+    } catch { return null; }
+  };
   return {
     read(prompt) {
       if (!root) return null;
-      try {
-        const item = JSON.parse(fs.readFileSync(path.join(root, `${hash(prompt)}.json`), 'utf8'));
-        return typeof item.text === 'string' && item.checksum === hash(item.text) ? item.text : null;
-      } catch { return null; }
+      const promptHash = hash(prompt);
+      return readFrom(root, promptHash) ?? (legacyRoot ? readFrom(legacyRoot, promptHash) : null);
     },
     write(prompt, text) {
       if (!root) return;

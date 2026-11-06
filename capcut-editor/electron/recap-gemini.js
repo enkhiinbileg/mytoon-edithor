@@ -96,6 +96,7 @@ async function createRecapGemini({ apiKey, model, progress, fetchImpl = fetch, w
       const tokenThrottle = response.status === 429 && quota.tokenLimit;
       const delay = Math.max(quota.retryMs, tokenThrottle ? 65000 : response.status === 429 ? 30000 * (attempt + 1) : 1500 * (attempt + 1));
       const maxRetries = tokenThrottle ? 5 : 2;
+      const retryable = (response.status === 429 && !quota.zeroModelQuota) || response.status >= 500;
       if (!retryable || attempt >= maxRetries || delay > 120000) throw error;
       await cooldown(delay, `Gemini HTTP ${response.status}: дахин оролдоно (${attempt + 1}/${maxRetries})`);
     }

@@ -70,6 +70,8 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('voice-align:progress', h);
   },
   syncTimelineSrt: spec => ipcRenderer.invoke('srt:sync', spec),
+  sliceSrtPreview: spec => ipcRenderer.invoke('srt:slicePreview', spec),
+  saveTextFileDialog: spec => ipcRenderer.invoke('dialog:saveTextFile', spec),
   autoCutBySrt: (spec) => ipcRenderer.invoke('recap:autoCutBySrt', spec),
   onRecapCutProgress: (cb) => {
     const h = (_e, p) => cb(p);
@@ -152,6 +154,16 @@ contextBridge.exposeInMainWorld('api', {
   // Fonts
   getAvailableFonts: () => ipcRenderer.invoke('fonts:getAvailable'),
   importCustomFonts: () => ipcRenderer.invoke('fonts:importCustom'),
+
+  // Image Recap Studio (Voice + Subtitle + Image Panel Sync)
+  openImagesOrFolder: (mode) => ipcRenderer.invoke('dialog:openImagesOrFolder', mode),
+  prepareImagePanels: (paths, options) => ipcRenderer.invoke('image-recap:preparePanels', paths, options),
+  alignImageRecap: (spec) => ipcRenderer.invoke('image-recap:align', spec),
+  onImageRecapProgress: (cb) => {
+    const h = (_e, p) => cb(p);
+    ipcRenderer.on('image-recap:progress', h);
+    return () => ipcRenderer.removeListener('image-recap:progress', h);
+  },
 
   // Absolute path -> URL the renderer can put in <video>/<img>.
   // `media` is registered as a *standard* scheme, and Chromium rejects standard

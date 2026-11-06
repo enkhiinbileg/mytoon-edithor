@@ -1457,6 +1457,31 @@ export default function Timeline({ onRequestExport, onQuickExportSelected }: Tim
           <span>{syncing ? 'Тааруулж байна...' : 'Auto Sync'}</span>
         </button>
 
+        <button
+          className="btn"
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            padding: '4px 12px',
+            fontSize: 12,
+            fontWeight: 600,
+            borderRadius: 6,
+            background: 'linear-gradient(135deg, #ec4899 0%, #8b5cf6 100%)',
+            color: '#fff',
+            cursor: 'pointer',
+            border: 'none',
+            lineHeight: 1.2,
+            boxShadow: '0 2px 10px rgba(236, 72, 153, 0.35)',
+            transition: 'all 0.2s ease'
+          }}
+          title="Voice + Subtitle + Зургийг уялдуулж автоматаар видео үүсгэх"
+          onClick={() => window.dispatchEvent(new CustomEvent('open-image-recap'))}
+        >
+          <span style={{ fontSize: 13 }}>🎨</span>
+          <span>Зураг + Хадмал студи</span>
+        </button>
+
         <div className="spacer" />
 
         <div className="zoom-row">

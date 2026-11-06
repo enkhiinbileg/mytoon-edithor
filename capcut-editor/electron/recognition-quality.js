@@ -56,10 +56,11 @@ function assessRecognition(result, activity) {
   if (!likelyNoSpeech && !tokens.length && activity.activeSeconds >= 0.5) {
     issues.push('empty transcript for active audio');
   }
-  if (words.some(w => !Number.isFinite(w.start) || !Number.isFinite(w.end) || w.end < w.start || w.start < -0.5 || w.end > duration + 0.5)) {
+  if (words.some(w => !Number.isFinite(w.start) || !Number.isFinite(w.end) || w.end < w.start || w.start < -0.5 || w.start > duration + 0.2 || w.end > duration + 1)) {
     issues.push('invalid word timestamps');
   }
-  if (segments.some(s => !Number.isFinite(s.start) || !Number.isFinite(s.end) || s.end <= s.start || s.end > duration + 0.5)) {
+  const maxSegmentEnd = Math.ceil(duration / 2) * 2 + 0.5;
+  if (segments.some(s => !Number.isFinite(s.start) || !Number.isFinite(s.end) || s.end <= s.start || s.start < -0.5 || s.start > duration + 0.5 || s.end > maxSegmentEnd)) {
     issues.push('invalid segment timestamps');
   }
   if (!likelyNoSpeech && activity.activeSeconds >= 4 && tokens.length < activity.activeSeconds * 0.45) {

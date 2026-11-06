@@ -72,6 +72,15 @@ function planRecapCuts(inputs, alignment) {
   }
   const cuts=[];
   const frameDuration=1/(video.fps>0?video.fps:30);
+  for (let i=0;i<scenes.length;i++) {
+    const s=scenes[i];
+    if (!s.introHold && i+1<scenes.length && !scenes[i+1].introHold && scenes[i+1].sourceStart>s.sourceStart+EPS) {
+      s.sourceEnd=Math.min(s.sourceEnd,scenes[i+1].sourceStart);
+    }
+    if (!s.introHold && s.sourceEnd<=s.sourceStart) {
+      s.sourceEnd=Math.min(video.duration,s.sourceStart+Math.max(frameDuration,EPS*10));
+    }
+  }
   scenes.forEach((s,i)=>{
     const start=i===0?voiceStart:Math.max(voiceStart,s.start);
     const finish=i+1<scenes.length?Math.min(voiceEnd,scenes[i+1].start):voiceEnd;
@@ -87,7 +96,9 @@ function planRecapCuts(inputs, alignment) {
     const hold=duration-motionDuration;
     if (hold>EPS) {
       // Hold the final frame INSIDE the source scene, not the first frame of the next scene.
-      const freezeTs=Math.max(s.sourceStart,Math.min(video.duration-frameDuration,Math.floor((s.sourceEnd-1e-7)/frameDuration)*frameDuration));
+      // Use safe margin from end of video to avoid decoding past EOF due to audio container skew.
+      const safeMaxEnd = Math.max(s.sourceStart, video.duration - Math.max(0.2, frameDuration * 3));
+      const freezeTs = Math.max(s.sourceStart, Math.min(safeMaxEnd, Math.floor((s.sourceEnd - 1e-7) / frameDuration) * frameDuration));
       cuts.push({start:start+motionDuration,inPoint:0,outPoint:hold,isFreeze:true,freezeTs,...metadata});
     }
   });
@@ -113,8 +124,23 @@ function validateTimeline(clips, media, voiceStart, voiceEnd) {
 async function autoCutByEnglishSrt(spec, progress, dependencies={}) {
   const inputs=resolveInputs(spec);
   if (!spec.srtPath && !spec.srtContent) throw new Error('Англи SRT файлыг сонгоно уу.');
-  const raw=spec.srtContent?srtParser.parseSrt(spec.srtContent):srtParser.parseSrtFile(spec.srtPath);
+  let raw=spec.srtContent?srtParser.parseSrt(spec.srtContent):srtParser.parseSrtFile(spec.srtPath);
   if (!raw.length || raw.some((s,i)=>i>0 && s.start<raw[i-1].start)) throw new Error('Англи SRT хоосон эсвэл цагийн дараалал буруу байна.');
+  let srtStartTime = spec.srtStartTime;
+  if (!srtStartTime && inputs.video?.path) {
+    const m = path.basename(inputs.video.path).match(/\[(\d{1,2})-(\d{2})-(\d{2})_/);
+    if (m) {
+      srtStartTime = `${m[1].padStart(2, '0')}:${m[2]}:${m[3]}`;
+    }
+  }
+  if (srtStartTime) {
+    const origCount = raw.length;
+    const { startSec, entries } = srtParser.sliceAndShiftSrt(raw, srtStartTime, spec.srtEndTime);
+    if (entries.length > 0) {
+      raw = entries;
+      progress?.({ stage: 'slicing', message: `✂️ SRT-г ${srtStartTime} (${Math.round(startSec)}с)-аас таслав: ${origCount}-аас ${raw.length} мөр үлдэж 00:00:00 боллоо.` });
+    }
+  }
   const englishSrt=srtParser.reconstructSentences(raw);
   progress?.({stage:'mapping',message:`${inputs.captions.length} Монгол хадмалыг ${englishSrt.length} Англи хэсэгтэй тулгаж байна…`});
   const sourceTitle=spec.srtPath ? path.basename(spec.srtPath,'.srt').replace(/\[[^\]]*\]/g,'').trim() : '';

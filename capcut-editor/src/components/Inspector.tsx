@@ -17,6 +17,7 @@ export default function Inspector() {
 
   const clip = useEditor((s) => s.clips.find((c) => c.id === s.selectedClipId));
   const media = useEditor((s) => (clip?.mediaId ? s.media.find((m) => m.id === clip.mediaId) : undefined));
+  const mediaList = useEditor((s) => s.media);
   const tracks = useEditor((s) => s.tracks);
   const moveClipToLayer = useEditor((s) => s.moveClipToLayer);
   const ensureLayerTrack = useEditor((s) => s.ensureLayerTrack);
@@ -34,10 +35,48 @@ export default function Inspector() {
   const allClips = useEditor((s) => s.clips);
 
   if (!clip) {
+    const currentClipAtPlayhead = allClips.find(
+      (c) => c.kind === 'av' && c.start <= playhead && c.start + clipDuration(c) > playhead
+    );
+    const mediaForClip = currentClipAtPlayhead ? mediaList.find((m) => m.id === currentClipAtPlayhead.mediaId) : null;
+
     return (
       <aside className="inspector">
         <div className="panel-head"><span className="panel-title">Details</span></div>
         <div className="panel-body">
+          {currentClipAtPlayhead && (
+            <div style={{ marginBottom: 14, padding: '10px 12px', background: 'rgba(56, 189, 248, 0.12)', border: '1px solid rgba(56, 189, 248, 0.4)', borderRadius: 8 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: '#38bdf8', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 5 }}>
+                <span>🎬</span>
+                <span>Одоо дэлгэц дээрх зураг:</span>
+              </div>
+              <div style={{ fontSize: 12, color: '#fff', fontWeight: 600, marginBottom: 8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {currentClipAtPlayhead.label || mediaForClip?.name || 'Зургийн кадр'}
+              </div>
+              <button
+                type="button"
+                className="btn primary"
+                style={{ width: '100%', fontSize: 12, padding: '8px 10px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontWeight: 700, background: '#0284c7', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer' }}
+                onClick={() => select(currentClipAtPlayhead.id)}
+              >
+                <span>✏️ Энэ зургийг хөдөлгөж тохируулах</span>
+              </button>
+              <button
+                type="button"
+                className="btn"
+                style={{ width: '100%', marginTop: 6, fontSize: 11, padding: '7px 10px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontWeight: 600, background: 'rgba(16, 185, 129, 0.2)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.5)', borderRadius: 6, cursor: 'pointer' }}
+                onClick={() => {
+                  useEditor.setState((s) => ({
+                    clips: s.clips.map((c) => (c.kind === 'av' ? { ...c, fitMode: 'contain' } : c))
+                  }));
+                }}
+                title="Timeline дээрх бүх зургуудыг тайрахгүй бүтнээр нь багтаах (Fit)"
+              >
+                <span>⚡ Бүх зургийг тайрахгүй (Fit) болгох</span>
+              </button>
+            </div>
+          )}
+
           <div className="insp-section">
             <h4>Project settings</h4>
             <div className="insp-row"><span>Name</span><span className="truncate">{projectName}</span></div>
@@ -47,8 +86,8 @@ export default function Inspector() {
             <div className="insp-row"><span>Frame rate</span><select aria-label="Project frame rate" className="insp-select" value={settings.fps} onChange={e=>useEditor.getState().setProjectSettings({fps:+e.target.value})}>{[24,25,30,50,60].map(f=><option key={f} value={f}>{f} fps</option>)}</select></div>
             <div className="insp-row"><span>Colour space</span><span>SDR · Rec.709</span></div>
           </div>
-          <div className="empty-hint" style={{ textAlign: 'left', padding: '4px 0' }}>
-            Select a clip to edit it.
+          <div className="empty-hint" style={{ textAlign: 'left', padding: '6px 0', fontSize: 11, color: '#888' }}>
+            💡 Дэлгэц дээрх зураг дээр хулганаар шууд чирч хөдөлгөх эсвэл дээрх товчийг дарж байрлалыг тохируулна уу.
           </div>
         </div>
       </aside>
@@ -75,7 +114,27 @@ export default function Inspector() {
   const handlePropChange = (patch: { scale?: number; x?: number; y?: number; rotation?: number; opacity?: number }) => {
     if (!clip) return;
     if (hasKeyframes) {
-      addKeyframe(clip.id, playhead, patch);
+      let updatedKfs = clip.keyframes || [];
+      if (patch.x !== undefined) {
+        const dx = patch.x - interpolated.x;
+        updatedKfs = updatedKfs.map((k) => ({ ...k, x: Math.max(-0.5, Math.min(1.5, Math.round((k.x + dx) * 1000) / 1000)) }));
+      }
+      if (patch.y !== undefined) {
+        const dy = patch.y - interpolated.y;
+        updatedKfs = updatedKfs.map((k) => ({ ...k, y: Math.max(-0.5, Math.min(1.5, Math.round((k.y + dy) * 1000) / 1000)) }));
+      }
+      if (patch.scale !== undefined) {
+        const factor = patch.scale / (interpolated.scale || 1);
+        updatedKfs = updatedKfs.map((k) => ({ ...k, scale: Math.max(0.05, Math.min(5.0, Math.round(k.scale * factor * 100) / 100)) }));
+      }
+      if (patch.rotation !== undefined) {
+        const drot = patch.rotation - interpolated.rotation;
+        updatedKfs = updatedKfs.map((k) => ({ ...k, rotation: Math.round(k.rotation + drot) }));
+      }
+      if (patch.opacity !== undefined) {
+        updatedKfs = updatedKfs.map((k) => ({ ...k, opacity: patch.opacity! }));
+      }
+      updateClip(clip.id, { ...patch, keyframes: updatedKfs });
     } else {
       updateClip(clip.id, patch);
     }
@@ -1225,7 +1284,7 @@ export default function Inspector() {
                   className="btn"
                   style={{fontSize:10,padding:'3px 8px',background:(clip.fitMode ?? 'contain') === 'contain' ? 'var(--accent)' : '#282828',color:(clip.fitMode ?? 'contain') === 'contain' ? '#062926' : '#bbb',fontWeight:(clip.fitMode ?? 'contain') === 'contain' ? 600 : 400}}
                   onClick={() => updateClip(clip.id, { fitMode: 'contain' })}
-                  title="Багтаах (Fit) - Видеог бүрэн багтааж харуулах"
+                  title="Багтаах (Fit) - Видеог бүрэн багтааж харуулах (Манхваг тайрахгүй бүрэн харуулна)"
                 >
                   Багтаах (Fit)
                 </button>
@@ -1237,6 +1296,85 @@ export default function Inspector() {
                   title="Дэлгэц дүүргэх (Cover) - Хажуугийн бүрсгэр хэсгийг тайрч голын манхваг дэлгэц дүүрэн томруулна"
                 >
                   Дүүргэх (Cover)
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  style={{
+                    fontSize: 10,
+                    padding: '3px 8px',
+                    background: 'rgba(16, 185, 129, 0.2)',
+                    color: '#34d399',
+                    border: '1px solid rgba(16, 185, 129, 0.5)',
+                    fontWeight: 600,
+                    marginLeft: 4
+                  }}
+                  onClick={() => {
+                    useEditor.setState((s) => ({
+                      clips: s.clips.map((c) => (c.kind === 'av' ? { ...c, fitMode: 'contain' } : c))
+                    }));
+                  }}
+                  title="Timeline дээрх бүх зургуудыг тайрахгүй бүтнээр нь багтаах (Fit)"
+                >
+                  ⚡ Бүгдийг Багтаах (Fit)
+                </button>
+              </div>
+            </div>
+
+            {/* Quick Framing for Webtoons & Manga (Solves cut off faces!) */}
+            <div className="insp-row" style={{ marginTop: 6, marginBottom: 8, background: '#1c1c24', padding: '6px 8px', borderRadius: 6, border: '1px solid #2f2f3d' }}>
+              <span style={{ fontSize: 11, fontWeight: 600, color: '#38bdf8' }}>Зургийн төвлөрөл</span>
+              <div style={{ display: 'flex', gap: 4, flex: 1, justifyContent: 'flex-end' }}>
+                <button
+                  type="button"
+                  className="btn"
+                  style={{
+                    fontSize: 10,
+                    padding: '3px 7px',
+                    background: interpolated.y < 0.42 ? 'var(--accent)' : '#27272a',
+                    color: interpolated.y < 0.42 ? '#062926' : '#e4e4e7',
+                    fontWeight: interpolated.y < 0.42 ? 700 : 400,
+                    border: '1px solid #3f3f46',
+                    borderRadius: 4
+                  }}
+                  onClick={() => handlePropChange({ y: 0.32 })}
+                  title="Дээд хэсгийг төвд харуулах (Дүрүүдийн нүүр царай, ярианы бөмбөлөг тод харагдана)"
+                >
+                  ⬆ Дээд (Царай)
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  style={{
+                    fontSize: 10,
+                    padding: '3px 7px',
+                    background: interpolated.y >= 0.42 && interpolated.y <= 0.58 ? 'var(--accent)' : '#27272a',
+                    color: interpolated.y >= 0.42 && interpolated.y <= 0.58 ? '#062926' : '#e4e4e7',
+                    fontWeight: interpolated.y >= 0.42 && interpolated.y <= 0.58 ? 700 : 400,
+                    border: '1px solid #3f3f46',
+                    borderRadius: 4
+                  }}
+                  onClick={() => handlePropChange({ y: 0.5 })}
+                  title="Зургийн голыг дэлгэцийн төвд байрлуулах"
+                >
+                  ⏺ Төв
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  style={{
+                    fontSize: 10,
+                    padding: '3px 7px',
+                    background: interpolated.y > 0.58 ? 'var(--accent)' : '#27272a',
+                    color: interpolated.y > 0.58 ? '#062926' : '#e4e4e7',
+                    fontWeight: interpolated.y > 0.58 ? 700 : 400,
+                    border: '1px solid #3f3f46',
+                    borderRadius: 4
+                  }}
+                  onClick={() => handlePropChange({ y: 0.68 })}
+                  title="Доод хэсгийг дэлгэцийн төвд байрлуулах"
+                >
+                  ⬇ Доод
                 </button>
               </div>
             </div>

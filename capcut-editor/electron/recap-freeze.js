@@ -81,12 +81,42 @@ function materializeOne(source, timestamp, outputDir) {
     const temporaryPath = path.join(outputDir, `.${key}.${crypto.randomUUID()}.partial.png`);
     try {
       // Input seeking is frame accurate while transcoding (FFmpeg accurate_seek).
-      // Do not copy a nearby thumbnail/keyframe: it can belong to another scene.
-      await run(['-hide_banner', '-loglevel', 'error', '-xerror', '-nostdin', '-y',
-        '-threads', '1', '-ss', String(timestamp), '-accurate_seek', '-i', source.actualPath,
-        '-map', '0:v:0', '-an', '-sn', '-dn', '-frames:v', '1',
-        '-c:v', 'png', '-threads', '1', '-update', '1', temporaryPath]);
-      if (!(await validPng(temporaryPath))) {
+      // Use candidate fallbacks in case timestamp is slightly past the final video packet.
+      const candidates = [
+        Number(timestamp),
+        Math.max(0, Number(timestamp) - 0.1),
+        Math.max(0, Number(timestamp) - 0.25),
+        Math.max(0, Number(timestamp) - 0.5)
+      ];
+
+      let ok = false;
+      for (const curTs of candidates) {
+        try {
+          await run(['-hide_banner', '-loglevel', 'error', '-xerror', '-nostdin', '-y',
+            '-threads', '1', '-ss', String(curTs), '-accurate_seek', '-i', source.actualPath,
+            '-map', '0:v:0', '-an', '-sn', '-dn', '-frames:v', '1',
+            '-c:v', 'png', '-threads', '1', '-update', '1', temporaryPath]);
+          if (await validPng(temporaryPath)) {
+            ok = true;
+            break;
+          }
+        } catch {}
+      }
+
+      if (!ok) {
+        // Fallback: try seeking from end (-sseof -1) for edge cases
+        try {
+          await run(['-hide_banner', '-loglevel', 'error', '-xerror', '-nostdin', '-y',
+            '-threads', '1', '-sseof', '-1', '-i', source.actualPath,
+            '-map', '0:v:0', '-an', '-sn', '-dn', '-frames:v', '1',
+            '-c:v', 'png', '-threads', '1', '-update', '1', temporaryPath]);
+          if (await validPng(temporaryPath)) {
+            ok = true;
+          }
+        } catch {}
+      }
+
+      if (!ok) {
         throw new Error(`No decodable video frame exists at ${timestamp} seconds.`);
       }
       // Publishing only complete images keeps interrupted jobs out of the cache.

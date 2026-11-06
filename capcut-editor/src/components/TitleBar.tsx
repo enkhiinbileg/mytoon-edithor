@@ -53,7 +53,8 @@ export default function TitleBar({ onExport, onSave, onOpen, onNew, onClose, onO
         <button onClick={() => {setMenu(false);onOpenProjects();}}>📁 Төслийн сан <kbd>Ctrl P</kbd></button>
         <button onClick={() => {setMenu(false);onNew();}}>Шинэ төсөл <kbd>Ctrl N</kbd></button>
         <button onClick={() => {setMenu(false);onOpen();}}>Файлаас нээх <kbd>Ctrl O</kbd></button>
-        <hr /><button onClick={() => {setMenu(false); window.dispatchEvent(new CustomEvent('open-audio-merger'));}}>🎵 Аудио нэгтгэх (Merge Audio)</button>
+        <hr /><button onClick={() => {setMenu(false); window.dispatchEvent(new CustomEvent('open-image-recap'));}}>🎨 Зураг & Хадмал холбогч</button>
+        <button onClick={() => {setMenu(false); window.dispatchEvent(new CustomEvent('open-audio-merger'));}}>🎵 Аудио нэгтгэх (Merge Audio)</button>
         <button onClick={() => {setMenu(false);onSave();}}>Хадгалах <kbd>Ctrl S</kbd></button>
         <button onClick={() => {setMenu(false);onSave(true);}}>Өөр нэрээр хадгалах <kbd>Ctrl Shift S</kbd></button>
       </div></>}
@@ -98,6 +99,27 @@ export default function TitleBar({ onExport, onSave, onOpen, onNew, onClose, onO
     >
       <span>🎵</span>
       <span>Аудио нэгтгэх</span>
+    </button>
+    <button
+      type="button"
+      className="btn ghost"
+      onClick={() => window.dispatchEvent(new CustomEvent('open-image-recap'))}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '4px 10px',
+        fontSize: 12,
+        fontWeight: 600,
+        background: 'rgba(168,85,247,0.12)',
+        border: '1px solid rgba(168,85,247,0.3)',
+        borderRadius: 'var(--radius-sm)',
+        color: '#d8b4fe'
+      }}
+      title="Зураг, хадмал, хоолойг уялдуулж видео үүсгэх"
+    >
+      <span>🎨</span>
+      <span>Зураг & Хадмал студи</span>
     </button>
     <div className="title-project"><input aria-label="Project name" value={name} onChange={e => rename(e.target.value)} onFocus={() => useEditor.getState().beginGesture()} onBlur={() => useEditor.getState().endGesture()} /><span className="save-state">{dirty ? '● Хадгалагдаагүй' : '✓ Автоматаар хадгалагдсан'}</span></div>
     <div className="titlebar-actions">

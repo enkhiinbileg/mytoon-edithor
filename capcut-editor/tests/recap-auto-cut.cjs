@@ -32,6 +32,18 @@ test('sub-300ms boundaries do not accumulate extra time',()=>{
  const inputs=core.resolveInputs(spec);const a=mapped(inputs);a.alignments.forEach((x,i)=>{x.videoStart=i/100;x.videoEnd=x.videoStart+0.001;});
  const p=core.planRecapCuts(inputs,a);const last=p.cuts.at(-1);assert.ok(Math.abs(last.start+last.outPoint-last.inPoint-0.1)<1e-8);
 });
+test('planRecapCuts clamps overlapping scene sourceEnd to next scene sourceStart so scenes never jump backward',()=>{
+ const spec=fixture();
+ const inputs=core.resolveInputs(spec);
+ const a={method:'fixture',warnings:[],alignments:[
+   {captionId:'c1',audioStart:3,audioEnd:5,videoStart:0,videoEnd:9.24,matchedSrtId:1,mongolianText:'Эхний өгүүлбэр',englishText:'One'},
+   {captionId:'c2',audioStart:7,audioEnd:9,videoStart:7.32,videoEnd:16.04,matchedSrtId:2,mongolianText:'Дараах өгүүлбэр',englishText:'Two'}
+ ]};
+ const p=core.planRecapCuts(inputs,a);
+ const motion=p.cuts.filter(c=>!c.isFreeze);
+ assert.equal(motion.length,2);
+ assert.ok(motion[0].outPoint<=motion[1].inPoint,'Scene 1 must not play past Scene 2 sourceStart');
+});
 test('missing/duplicate matches, wrong timing and extraction failures abort without mutation',async()=>{
  for(const corrupt of [a=>a.alignments.pop(),a=>a.alignments.push(a.alignments[0]),a=>a.alignments[0].audioEnd+=1,a=>a.alignments[0].videoStart=100]) {
    const spec=fixture(),before=JSON.stringify(spec);
@@ -54,14 +66,31 @@ test('cache remaps fragmented captions using current timings and verifies source
  assert.equal(alignment.reuseTranscript(caps,[{...eng[0],text:'Unrelated video'}],5,saved),null);
  assert.equal(alignment.reuseTranscript([{...caps[0],style:{text:'Өөр voice'}}],eng,5,saved),null);
 });
+test('bare-array Gemini replies are accepted and unmatched captions are interpolated, not frozen on one frame',async()=>{
+ const englishSrt=Array.from({length:10},(_,i)=>({id:i+1,start:i*10,end:i*10+10,text:`English block ${i+1}.`}));
+ const captions=Array.from({length:10},(_,i)=>({id:'c'+i,start:i*10,inPoint:0,outPoint:9,style:{text:`Монгол ${i}.`}}));
+ const reply=text=>async(_url,options)=>({ok:true,json:async()=>options.method==='GET'
+   ? {models:[{name:'models/gemini-test-flash',supportedGenerationMethods:['generateContent']}]}
+   : {candidates:[{content:{parts:[{text}]}}]}});
+ const arr=captions.map((c,i)=>({id:i,startId:i+1,endId:i+1,confidence:.9}));
+ const a=await alignment.geminiAlign({captions,englishSrt,videoDuration:100,apiKey:'test'},null,reply(JSON.stringify(arr)));
+ assert.deepEqual(a.alignments.map(x=>x.matchedSrtId),[1,2,3,4,5,6,7,8,9,10]);
+ const gaps=arr.map((m,i)=>i>=2&&i<=7?{id:i,startId:null,endId:null,kind:'unmatched'}:m);
+ const b=await alignment.geminiAlign({captions,englishSrt,videoDuration:100,apiKey:'test'},null,reply(JSON.stringify({matches:gaps})));
+ const ids=b.alignments.map(x=>x.matchedSrtId);
+ assert.ok(new Set(ids.slice(2,8)).size>=4,'unmatched run must spread across source blocks: '+ids.join(','));
+ for(let i=1;i<ids.length;i++) assert.ok(ids[i]>=ids[i-1]);
+});
 test('Gemini rejects missing/uncertain/HTTP-error output instead of proportional guessing',async()=>{
  const spec={captions:fixture().captions,englishSrt:[{id:1,start:0,end:2,text:'English'}],videoDuration:20,apiKey:'test'};
  const response=matches=>async(_url,options)=>({ok:true,json:async()=>options.method==='GET'
    ? {models:[{name:'models/gemini-test-flash',supportedGenerationMethods:['generateContent']}]}
    : {candidates:[{content:{parts:[{text:JSON.stringify({matches})}]}}]}});
  await assert.rejects(alignment.geminiAlign({...spec,apiKey:''},null,response([])),/API key/);
- await assert.rejects(alignment.geminiAlign(spec,null,response([{id:0,startId:1,endId:1,confidence:.9}])),/орхисон/);
- await assert.rejects(alignment.geminiAlign(spec,null,response([{id:0,startId:null,endId:null,confidence:0},{id:1,startId:1,endId:1,confidence:.9}])),/тодорхойгүй/);
+ const healed = await alignment.geminiAlign(spec,null,response([{id:0,startId:1,endId:1,confidence:.9}]));
+ assert.equal(healed.alignments.length, 2);
+ const relaxed = await alignment.geminiAlign(spec,null,response([{id:0,startId:null,endId:null,confidence:0},{id:1,startId:1,endId:1,confidence:.9}]));
+ assert.equal(relaxed.alignments.length, 2);
  await assert.rejects(alignment.geminiAlign(spec,null,async()=>({ok:false,status:429,json:async()=>({error:{message:'Quota exceeded, limit: 0, model: gemini-test-flash'}})})),/429/);
  const good=await alignment.geminiAlign(spec,null,response([{id:0,startId:1,endId:1,confidence:.9},{id:1,startId:1,endId:1,confidence:.8}]));
  assert.equal(good.alignments.length,2);assert.equal(good.method,'gemini-semantic');

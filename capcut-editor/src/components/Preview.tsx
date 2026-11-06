@@ -187,7 +187,8 @@ function VideoLayer({
   playing,
   transitionStyle,
   isHeld = false,
-  coverMedia = null
+  coverMedia = null,
+  onDrag
 }: {
   clip: Clip;
   media: MediaItem;
@@ -196,6 +197,7 @@ function VideoLayer({
   transitionStyle?: React.CSSProperties;
   isHeld?: boolean;
   coverMedia?: MediaItem | null;
+  onDrag?: (e: React.PointerEvent, c: Clip) => void;
 }) {
   const ref = useRef<HTMLVideoElement>(null);
   const isImage = media.kind === 'image';
@@ -292,18 +294,29 @@ function VideoLayer({
       style={{
         opacity: tf.opacity,
         visibility: 'visible',
+        cursor: isHeld ? 'default' : 'grab',
         ...transitionStyle
+      }}
+      onPointerDown={(e) => {
+        if (isHeld) return;
+        e.stopPropagation();
+        if (onDrag) onDrag(e, clip);
+        else useEditor.getState().select(clip.id);
       }}
     >
       {isImage ? (
         <img
           src={window.api.toMediaUrl(media.path)}
           alt=""
-          style={style}
+          style={{
+            ...style,
+            cursor: isHeld ? 'default' : 'grab'
+          }}
           onPointerDown={(e) => {
             if (isHeld) return;
             e.stopPropagation();
-            useEditor.getState().select(clip.id);
+            if (onDrag) onDrag(e, clip);
+            else useEditor.getState().select(clip.id);
           }}
         />
       ) : (
@@ -314,11 +327,15 @@ function VideoLayer({
             muted
             preload="auto"
             playsInline
-            style={style}
+            style={{
+              ...style,
+              cursor: isHeld ? 'default' : 'grab'
+            }}
             onPointerDown={(e) => {
               if (isHeld) return;
               e.stopPropagation();
-              useEditor.getState().select(clip.id);
+              if (onDrag) onDrag(e, clip);
+              else useEditor.getState().select(clip.id);
             }}
           />
           {coverMedia && !frameReady && (
@@ -517,7 +534,14 @@ function VideoTransformBox({
       setLiveInfo(`X: ${Math.round((newX - 0.5) * 200)}% · Y: ${Math.round((newY - 0.5) * 200)}%`);
 
       if (hasKf) {
-        useEditor.getState().addKeyframe(clip.id, relTime, { x: newX, y: newY });
+        const deltaX = newX - initX;
+        const deltaY = newY - initY;
+        const updatedKfs = (clip.keyframes || []).map((k) => ({
+          ...k,
+          x: Math.max(-0.5, Math.min(1.5, Math.round((k.x + deltaX) * 1000) / 1000)),
+          y: Math.max(-0.5, Math.min(1.5, Math.round((k.y + deltaY) * 1000) / 1000))
+        }));
+        useEditor.getState().updateClip(clip.id, { x: newX, y: newY, keyframes: updatedKfs });
       } else {
         useEditor.getState().updateClip(clip.id, { x: newX, y: newY });
       }
@@ -1011,12 +1035,27 @@ export default function Preview() {
     const relTime = Math.max(0, Math.min(clipDuration(c), s.playhead - c.start));
 
     const move = (ev: PointerEvent) => {
-      const newX = Math.min(1, Math.max(0, initialX + (ev.clientX - x) / box.width));
-      const newY = Math.min(1, Math.max(0, initialY + (ev.clientY - y) / box.height));
+      const dx = (ev.clientX - x) / box.width;
+      const dy = (ev.clientY - y) / box.height;
+      const newX = Math.min(1.5, Math.max(-0.5, initialX + dx));
+      const newY = Math.min(1.5, Math.max(-0.5, initialY + dy));
       if (hasKf) {
-        useEditor.getState().addKeyframe(c.id, relTime, { x: newX, y: newY });
+        // Shift all keyframes so that framing adjustment persists across entire clip!
+        const updatedKfs = (c.keyframes || []).map((k) => ({
+          ...k,
+          x: Math.max(-0.5, Math.min(1.5, Math.round((k.x + dx) * 1000) / 1000)),
+          y: Math.max(-0.5, Math.min(1.5, Math.round((k.y + dy) * 1000) / 1000))
+        }));
+        useEditor.getState().updateClip(c.id, {
+          x: Math.round(newX * 1000) / 1000,
+          y: Math.round(newY * 1000) / 1000,
+          keyframes: updatedKfs
+        });
       } else {
-        useEditor.getState().updateClip(c.id, { x: newX, y: newY });
+        useEditor.getState().updateClip(c.id, {
+          x: Math.round(newX * 1000) / 1000,
+          y: Math.round(newY * 1000) / 1000
+        });
       }
     };
     const up = () => {
@@ -1043,7 +1082,7 @@ export default function Preview() {
   const handleStagePointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0 && e.button !== 1) return;
     const target = e.target as HTMLElement;
-    if (target.closest('.video-transform-box') || target.closest('.overlay-item')) return;
+    if (target.closest('.video-transform-box') || target.closest('.overlay-item') || target.closest('.video-layer')) return;
     useEditor.getState().select(null);
     if (zoomMode !== 'fit') {
       setIsPanning(true);
@@ -1122,7 +1161,7 @@ export default function Preview() {
               }
             }}
           >
-            {layers.map(({ key, ...layer }) => <VideoLayer key={key} {...layer} />)}
+            {layers.map(({ key, ...layer }) => <VideoLayer key={key} {...layer} onDrag={drag} />)}
             {!clips.length && (
               <div className="stage-empty"><Icon name="media" /><span>Your video preview</span></div>
             )}
