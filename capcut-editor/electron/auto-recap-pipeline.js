@@ -986,7 +986,7 @@ async function executePipelineInternal({ jobId, jobDir, manifest, spec, options 
     saveManifest();
 
     let abortListener = null;
-    if (signal) {
+    if (signal && options.deps?.ff) {
       abortListener = () => {
         try { d.ff.cancelExport?.(); } catch {}
       };
@@ -1007,7 +1007,7 @@ async function executePipelineInternal({ jobId, jobDir, manifest, spec, options 
           overallPct: 75 + Math.round(expPct * 0.25),
           message: `🎬 5/5: Экспортлож байна (${expPct}%${spdText}${etaText})...`
         });
-      });
+      }, { signal });
     } finally {
       if (signal && abortListener) signal.removeEventListener('abort', abortListener);
     }

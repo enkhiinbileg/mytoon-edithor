@@ -809,3 +809,51 @@ test('dispatchPoolTTS recovers previously split cached sub-chunks without re-cha
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('ff.exportTimeline with signal aborts only the signaled export without canceling a concurrent manual export', async () => {
+  const dir = makeTempDir('cutline-exp-iso-');
+  try {
+    const videoPath = path.join(dir, 'src.mp4');
+    await makeSyntheticVideo(videoPath, 4.0);
+    const manualOut = path.join(dir, 'manual.mp4');
+    const bgOut = path.join(dir, 'bg.mp4');
+
+    const baseSpec = {
+      clips: [{
+        src: videoPath,
+        trackId: 'v1',
+        layer: 0,
+        kind: 'video',
+        opacity: 1,
+        start: 0,
+        inPoint: 0,
+        outPoint: 4.0,
+        hasAudio: true,
+        volume: 1
+      }],
+      audio: [],
+      overlays: [],
+      width: 640,
+      height: 360,
+      fps: 24,
+      duration: 4.0,
+      codec: 'h264',
+      quality: 'draft',
+      format: 'mp4',
+      audioBitrate: '128k'
+    };
+
+    const bgController = new AbortController();
+    const manualPromise = ff.exportTimeline({ ...baseSpec, outPath: manualOut });
+    const bgPromise = ff.exportTimeline({ ...baseSpec, outPath: bgOut }, () => {}, { signal: bgController.signal });
+
+    setTimeout(() => bgController.abort(), 150);
+
+    await assert.rejects(() => bgPromise);
+    const manualResult = await manualPromise;
+    assert.equal(manualResult, manualOut);
+    assert.ok(fs.existsSync(manualOut) && fs.statSync(manualOut).size > 1000);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

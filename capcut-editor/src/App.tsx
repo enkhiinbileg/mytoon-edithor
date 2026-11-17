@@ -17,13 +17,14 @@ import AudioMergerModal from './components/AudioMergerModal';
 import ImageRecapStudioModal from './components/ImageRecapStudioModal';
 import SafeRecapModal from './safe-recap/SafeRecapModal';
 import AutoPipelineModal from './components/AutoPipelineModal';
+import BackgroundTaskDock from './components/BackgroundTaskDock';
 import HomeScreen from './components/HomeScreen';
 import { saveProject, openProject, restoreProject, startProjectAutosave, flushDraft, deleteProject, switchToProject } from './project';
 import { importPaths } from './importMedia';
 import { buildOverlays } from './overlayRaster';
 import { effectById, filterById, transitionById } from './looks';
 import { useEditor, getVideoTrackLevel } from './store';
-import { clipDuration, clipEnd, type ExportAudioSpec, type ExportClipSpec } from './types';
+import { clipDuration, clipEnd, type AutoPipelineBgState, type ExportAudioSpec, type ExportClipSpec, type SafeRecapBgState } from './types';
 
 export default function App() {
   const [viewMode, setViewMode] = useState<'home' | 'editor'>('home');
@@ -40,16 +41,26 @@ export default function App() {
   const [audioScriptOpen, setAudioScriptOpen] = useState(false);
   const [audioMergerOpen, setAudioMergerOpen] = useState(false);
   const [imageRecapOpen, setImageRecapOpen] = useState(false);
+  const [safeRecapMounted, setSafeRecapMounted] = useState(false);
   const [safeRecapOpen, setSafeRecapOpen] = useState(false);
+  const [safeRecapBg, setSafeRecapBg] = useState<SafeRecapBgState | null>(null);
+  const [autoPipelineMounted, setAutoPipelineMounted] = useState(false);
   const [autoPipelineOpen, setAutoPipelineOpen] = useState(false);
+  const [autoPipelineBg, setAutoPipelineBg] = useState<AutoPipelineBgState | null>(null);
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showNotice = useCallback((msg: string) => {
+    setNotice(msg);
+    if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+    noticeTimerRef.current = setTimeout(() => setNotice(null), 6000);
+  }, []);
 
   useEffect(() => {
     const handleOpenStudio = () => setScriptStudioOpen(true);
     const handleOpenAudioScript = () => setAudioScriptOpen(true);
     const handleOpenAudioMerger = () => setAudioMergerOpen(true);
     const handleOpenImageRecap = () => setImageRecapOpen(true);
-    const handleOpenSafeRecap = () => setSafeRecapOpen(true);
-    const handleOpenAutoPipeline = () => setAutoPipelineOpen(true);
+    const handleOpenSafeRecap = () => { setSafeRecapMounted(true); setSafeRecapOpen(true); };
+    const handleOpenAutoPipeline = () => { setAutoPipelineMounted(true); setAutoPipelineOpen(true); };
     const handleOpenAutoSync = () => {
       setTab('text');
       setTimeout(() => {
@@ -422,14 +433,22 @@ export default function App() {
     : tab === 'dub' ? null
     : <LookPanel mode="filters" />;
 
-  const autoPipelineNode = autoPipelineOpen ? (
+  const autoPipelineNode = autoPipelineMounted ? (
     <AutoPipelineModal
       isOpen={autoPipelineOpen}
-      onClose={() => setAutoPipelineOpen(false)}
+      onMinimize={() => setAutoPipelineOpen(false)}
+      onClose={() => {
+        setAutoPipelineOpen(false);
+        setAutoPipelineMounted(false);
+        setAutoPipelineBg(null);
+      }}
+      onBackgroundStateChange={setAutoPipelineBg}
       onOpenProject={async (projectId, projectPath) => {
         if (projectId) {
           await switchToProject(projectId);
           setAutoPipelineOpen(false);
+          setAutoPipelineMounted(false);
+          setAutoPipelineBg(null);
           setViewMode('editor');
           return;
         }
@@ -438,44 +457,72 @@ export default function App() {
           if (res?.ok && res.data) {
             useEditor.getState().loadProject(res.data, res.path ?? null);
             setAutoPipelineOpen(false);
+            setAutoPipelineMounted(false);
+            setAutoPipelineBg(null);
             setViewMode('editor');
           }
         }
       }}
-      onSuccessNotice={(msg) => {
-        setNotice(msg);
-        setTimeout(() => setNotice(null), 6000);
-      }}
+      onSuccessNotice={showNotice}
     />
   ) : null;
 
-  if (viewMode === 'home') {
-    return (
-      <>
-        <HomeScreen onEnterEditor={() => setViewMode('editor')} />
-        {autoPipelineNode}
-      {safeRecapOpen && (
-        <SafeRecapModal
-          isOpen={safeRecapOpen}
-          onClose={() => setSafeRecapOpen(false)}
-          onSuccessNotice={(msg) => {
-            setNotice(msg);
-            setTimeout(() => setNotice(null), 6000);
-          }}
-        />
+  const safeRecapNode = safeRecapMounted ? (
+    <SafeRecapModal
+      isOpen={safeRecapOpen}
+      onMinimize={() => setSafeRecapOpen(false)}
+      onClose={() => {
+        setSafeRecapOpen(false);
+        setSafeRecapMounted(false);
+        setSafeRecapBg(null);
+      }}
+      onBackgroundStateChange={setSafeRecapBg}
+      onSuccessNotice={showNotice}
+    />
+  ) : null;
+
+  const hasToast = Boolean(notice || (!exportOpen && exportPct !== null) || exportError || doneMsg);
+
+  const toastNodes = hasToast ? (
+    <>
+      {notice && (
+        <div className="toast" role="status" style={{ position: 'static', pointerEvents: 'auto' }} onClick={() => setNotice(null)}>
+          {notice}
+          <button className="notice-close" aria-label="Dismiss message" onClick={() => setNotice(null)}>×</button>
+        </div>
       )}
-        {notice && (
-          <div className="toast" role="status" onClick={() => setNotice(null)}>
-            {notice}
-            <button className="notice-close" aria-label="Dismiss message" onClick={() => setNotice(null)}>×</button>
+      {!exportOpen && exportPct !== null && (
+        <div className="toast" style={{ position: 'static', pointerEvents: 'auto' }}>
+          Exporting… {typeof exportPct === 'number' ? exportPct : (exportPct as any)?.pct ?? 0}%
+          <div className="bar"><i style={{ width: `${typeof exportPct === 'number' ? exportPct : (exportPct as any)?.pct ?? 0}%` }} /></div>
+        </div>
+      )}
+      {exportError && (
+        <div className="toast error" style={{ position: 'static', pointerEvents: 'auto' }} onClick={() => setExportError(null)}>
+          <b>Export failed</b>
+          <div style={{ marginTop: 6, color: 'var(--text-dim)', whiteSpace: 'pre-wrap' }}>
+            {exportError}
           </div>
-        )}
-      </>
-    );
-  }
+        </div>
+      )}
+      {doneMsg && (
+        <div className="toast" style={{ position: 'static', pointerEvents: 'auto' }} onClick={() => setDoneMsg(null)}>
+          {doneMsg}
+        </div>
+      )}
+    </>
+  ) : null;
 
   return (
-    <div className="app" style={{gridTemplateRows:`44px minmax(140px, 1fr) 7px minmax(140px, ${timelineHeight}%)`}}>
+    <>
+      {viewMode === 'home' ? (
+        <HomeScreen
+          onEnterEditor={() => setViewMode('editor')}
+          autoPipelineBg={autoPipelineBg}
+          safeRecapBg={safeRecapBg}
+        />
+      ) : (
+        <div className="app" style={{gridTemplateRows:`44px minmax(140px, 1fr) 7px minmax(140px, ${timelineHeight}%)`}}>
       <TitleBar
         onExport={() => openExportDialog('all')}
         onSave={onSave}
@@ -484,6 +531,8 @@ export default function App() {
         onClose={onClose}
         onOpenProjects={() => setProjectsOpen(true)}
         onGoHome={onGoHome}
+        autoPipelineBg={autoPipelineBg}
+        safeRecapBg={safeRecapBg}
       />
 
       <div className={'midrow' + (playerExpanded ? ' player-expanded' : '')}>
@@ -558,44 +607,27 @@ export default function App() {
         <ImageRecapStudioModal
           isOpen={imageRecapOpen}
           onClose={() => setImageRecapOpen(false)}
-          onSuccessNotice={(msg) => {
-            setNotice(msg);
-            setTimeout(() => setNotice(null), 6000);
-          }}
+          onSuccessNotice={showNotice}
         />
+      )}
+        </div>
       )}
       {autoPipelineNode}
-      {safeRecapOpen && (
-        <SafeRecapModal
-          isOpen={safeRecapOpen}
-          onClose={() => setSafeRecapOpen(false)}
-          onSuccessNotice={(msg) => {
-            setNotice(msg);
-            setTimeout(() => setNotice(null), 6000);
-          }}
-        />
-      )}
-      {notice && <div className="toast" role="status" onClick={()=>setNotice(null)}>{notice}<button className="notice-close" aria-label="Dismiss message" onClick={()=>setNotice(null)}>×</button></div>}
-
-      {!exportOpen && exportPct !== null && (
-        <div className="toast">
-          Exporting… {typeof exportPct === 'number' ? exportPct : (exportPct as any)?.pct ?? 0}%
-          <div className="bar"><i style={{ width: `${typeof exportPct === 'number' ? exportPct : (exportPct as any)?.pct ?? 0}%` }} /></div>
-        </div>
-      )}
-      {exportError && (
-        <div className="toast error" onClick={() => setExportError(null)}>
-          <b>Export failed</b>
-          <div style={{ marginTop: 6, color: 'var(--text-dim)', whiteSpace: 'pre-wrap' }}>
-            {exportError}
-          </div>
-        </div>
-      )}
-      {doneMsg && (
-        <div className="toast" onClick={() => setDoneMsg(null)}>
-          {doneMsg}
-        </div>
-      )}
-    </div>
+      {safeRecapNode}
+      <BackgroundTaskDock
+        autoPipelineVisible={autoPipelineMounted && !autoPipelineOpen}
+        autoPipelineBg={autoPipelineBg}
+        onRestoreAutoPipeline={() => setAutoPipelineOpen(true)}
+        onDismissAutoPipeline={() => { setAutoPipelineOpen(false); setAutoPipelineMounted(false); setAutoPipelineBg(null); }}
+        safeRecapVisible={safeRecapMounted && !safeRecapOpen}
+        safeRecapOpen={safeRecapOpen}
+        safeRecapBg={safeRecapBg}
+        onRestoreSafeRecap={() => setSafeRecapOpen(true)}
+        onOpenSafeRecap={() => { setSafeRecapMounted(true); setSafeRecapOpen(true); }}
+        onDismissSafeRecap={() => { setSafeRecapOpen(false); setSafeRecapMounted(false); setSafeRecapBg(null); }}
+      >
+        {toastNodes}
+      </BackgroundTaskDock>
+    </>
   );
 }

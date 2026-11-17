@@ -883,3 +883,30 @@ export interface AutoPipelineJobSummary {
   savedProjectId?: string | null;
   scriptPreview?: string;
 }
+
+export interface AutoPipelineBgState {
+  running: boolean;
+  batchRunning: boolean;
+  overallPct: number;
+  stepIndex: number;
+  stepKey?: 'voice' | 'whisper' | 'fix' | 'autocut' | 'export';
+  message: string;
+  outputName?: string;
+  batchCompleted?: number;
+  batchTotal?: number;
+  status: 'idle' | 'running' | 'completed' | 'failed' | 'canceled';
+  outPath?: string;
+  error?: string;
+  savedProjectId?: string | null;
+  savedProjectPath?: string | null;
+}
+
+export interface SafeRecapBgState {
+  busy: boolean;
+  progressPct: number | null;
+  statusMsg: string;
+  errorMsg: string;
+  sessionName: string;
+  panelCount: number;
+  planCount: number;
+}

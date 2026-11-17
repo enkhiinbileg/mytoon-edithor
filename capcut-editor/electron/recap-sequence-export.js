@@ -30,10 +30,15 @@ function isSimpleMutedSequence(clips) {
   });
 }
 
-function run(ffmpeg, args, onProcess, onTime) {
+function run(ffmpeg, args, onProcess, onTime, signal = null) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      return reject(Object.assign(new Error('Хэрэглэгч зогсоолоо.'), { name: 'AbortError' }));
+    }
     const process = spawn(ffmpeg, args, { windowsHide: true });
     onProcess?.(process);
+    const onAbort = () => { try { process.kill(); } catch {} };
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
     let stderr = '';
     let pending = '';
     process.stdout.on('data', data => {
@@ -47,11 +52,17 @@ function run(ffmpeg, args, onProcess, onTime) {
     // A bad decoder must eventually stop; normal long batches still get 30 min.
     const timeout = setTimeout(() => process.kill(), 30 * 60 * 1000);
     process.stderr.on('data', (data) => { stderr = (stderr + data).slice(-8000); });
-    process.on('error', (error) => { clearTimeout(timeout); reject(error); });
-    process.on('close', (code) => {
+    const cleanup = () => {
       clearTimeout(timeout);
+      if (signal) signal.removeEventListener('abort', onAbort);
       onProcess?.(null);
-      if (code === 0) resolve();
+    };
+    process.on('error', (error) => { cleanup(); reject(error); });
+    process.on('close', (code) => {
+      cleanup();
+      if (signal?.aborted) {
+        reject(Object.assign(new Error('Хэрэглэгч зогсоолоо.'), { name: 'AbortError' }));
+      } else if (code === 0) resolve();
       else reject(new Error(`Sequence preparation failed or was cancelled: ${stderr || code}`));
     });
   });
@@ -97,7 +108,8 @@ function videoStreamDuration(ffprobe, filePath) {
  * hundreds of fractional-duration cuts cannot accumulate independent rounding.
  */
 async function normalizeSimpleSequence({ clips, width, height, fps, duration,
-  workDir, ffmpeg, ffprobe, onProcess, onProgress, encodeArgs, overlays = [] }) {
+  workDir, ffmpeg, ffprobe, onProcess, onProgress, encodeArgs, overlays = [], signal = null }) {
+  if (signal?.aborted) throw Object.assign(new Error('Хэрэглэгч зогсоолоо.'), { name: 'AbortError' });
   if (!isSimpleMutedSequence(clips)) throw new Error('Only simple muted sequences can use bounded normalization.');
   const totalFrames = Math.ceil(duration * fps - 1e-7);
   const contiguousTolerance = Math.min(1e-3, 0.25 / fps);
@@ -144,6 +156,7 @@ async function normalizeSimpleSequence({ clips, width, height, fps, duration,
       speed: `${speed.toFixed(1)}x`, fps: Math.round(speed * fps) });
   };
   for (let offset = 0; offset < segments.length; offset += 8) {
+    if (signal?.aborted) throw Object.assign(new Error('Хэрэглэгч зогсоолоо.'), { name: 'AbortError' });
     const chunk = segments.slice(offset, offset + 8);
     const args = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-filter_complex_threads', '1'];
     const filters = [];
@@ -202,7 +215,7 @@ async function normalizeSimpleSequence({ clips, width, height, fps, duration,
     args.push('-filter_complex', filters.join(';'), '-map', outputLabel, '-an',
       ...(encodeArgs || ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '16', '-pix_fmt', 'yuv420p', '-threads', '2']),
       '-frames:v', String(expected), '-r', String(fps), '-progress', 'pipe:1', '-nostats', output);
-    await run(ffmpeg, args, onProcess, seconds => report(completedFrames + Math.min(expected, Math.floor(seconds * fps))));
+    await run(ffmpeg, args, onProcess, seconds => report(completedFrames + Math.min(expected, Math.floor(seconds * fps))), signal);
     const actual = await frameCount(ffprobe, output);
     if (actual !== expected) throw new Error(`Prepared sequence lost frames: expected ${expected}, got ${actual}.`);
     // Only normalized streams share this manifest, never source files or images.

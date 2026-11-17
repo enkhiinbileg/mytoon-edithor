@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useEditor } from '../store';
-import type { Voice } from '../types';
+import type { SafeRecapBgState, Voice } from '../types';
 import SafeCropEditorModal from './SafeCropEditorModal';
 import { applySafePlanToTimeline, buildSafeKeyframes, createInstantSafePlan } from './safeMotion';
 import type {
@@ -19,6 +19,8 @@ import type {
 interface Props {
   isOpen: boolean;
   onClose: () => void;
+  onMinimize?: () => void;
+  onBackgroundStateChange?: (state: SafeRecapBgState) => void;
   onSuccessNotice?: (msg: string) => void;
 }
 
@@ -53,7 +55,16 @@ const STATUS_BADGE: Record<SafePanelItem['safetyStatus'], { label: string; bg: s
   unchecked: { label: 'Шалгаагүй', bg: 'rgba(113,113,122,0.2)', fg: '#a1a1aa', icon: '⚪' }
 };
 
-export default function SafeRecapModal({ isOpen, onClose, onSuccessNotice }: Props) {
+export default function SafeRecapModal({
+  isOpen,
+  onClose,
+  onMinimize,
+  onBackgroundStateChange,
+  onSuccessNotice
+}: Props) {
+  const isOpenRef = useRef(isOpen);
+  isOpenRef.current = isOpen;
+  const initializedRef = useRef(false);
   const [sessionId, setSessionId] = useState<string>(() => `sr_${Date.now()}`);
   const [sessionName, setSessionName] = useState<string>('Вебтүүн Safe Recap');
   const [savedSessions, setSavedSessions] = useState<SafeSessionSummary[]>([]);
@@ -159,31 +170,52 @@ export default function SafeRecapModal({ isOpen, onClose, onSuccessNotice }: Pro
     } catch {}
   };
 
+  // Keep SafeRecap progress listener alive even when minimized to background
   useEffect(() => {
-    if (!isOpen) return;
+    const sr = window.api.safeRecap;
+    if (!sr) return;
+    const unsub = sr.onProgress((p) => {
+      if (p.message) setStatusMsg(p.message);
+      if (typeof p.percent === 'number') setProgressPct(p.percent);
+    });
+    return () => {
+      unsub();
+      audioRef.current?.pause();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen) {
+      audioRef.current?.pause();
+      setPlayingRowId(null);
+      return;
+    }
     const sr = window.api.safeRecap;
     if (!sr) return;
 
     sr.checkEnv().then(setEnvStatus).catch(() => {});
     refreshHistory();
 
-    sr.getWhisperStatus?.()
-      .then((wRes) => {
-        if (wRes?.ok && Array.isArray(wRes.models)) {
-          setWhisperModels(wRes.models);
-          const installed = wRes.models.filter((m) => m.installed);
-          const def = installed.find((m) => m.id === 'groq-whisper-large-v3') || installed[0];
-          if (def) setWhisperModel(def.id);
-        }
-      })
-      .catch(() => {});
+    if (!initializedRef.current) {
+      initializedRef.current = true;
+      sr.getWhisperStatus?.()
+        .then((wRes) => {
+          if (wRes?.ok && Array.isArray(wRes.models)) {
+            setWhisperModels(wRes.models);
+            const installed = wRes.models.filter((m) => m.installed);
+            const def = installed.find((m) => m.id === 'groq-whisper-large-v3') || installed[0];
+            if (def) setWhisperModel(def.id);
+          }
+        })
+        .catch(() => {});
 
-    window.api
-      .listVoices?.('elevenlabs')
-      .then((vRes) => {
-        if (vRes?.ok && vRes.voices?.length) setVoices(vRes.voices);
-      })
-      .catch(() => {});
+      window.api
+        .listVoices?.('elevenlabs')
+        .then((vRes) => {
+          if (vRes?.ok && vRes.voices?.length) setVoices(vRes.voices);
+        })
+        .catch(() => {});
+    }
 
     // Auto-detect existing Timeline audio/subtitles only if current session has none yet
     const store = useEditor.getState();
@@ -215,16 +247,19 @@ export default function SafeRecapModal({ isOpen, onClose, onSuccessNotice }: Pro
         setSubFileName(`Timeline (${textClips.length} мөр)`);
       }
     }
-
-    const unsub = sr.onProgress((p) => {
-      if (p.message) setStatusMsg(p.message);
-      if (typeof p.percent === 'number') setProgressPct(p.percent);
-    });
-    return () => {
-      unsub();
-      audioRef.current?.pause();
-    };
   }, [isOpen]);
+
+  useEffect(() => {
+    onBackgroundStateChange?.({
+      busy,
+      progressPct,
+      statusMsg,
+      errorMsg,
+      sessionName,
+      panelCount: panels.length,
+      planCount: plan.length
+    });
+  }, [onBackgroundStateChange, busy, progressPct, statusMsg, errorMsg, sessionName, panels.length, plan.length]);
 
   const counts = useMemo(() => {
     let safe = 0;
@@ -247,8 +282,6 @@ export default function SafeRecapModal({ isOpen, onClose, onSuccessNotice }: Pro
 
   const safeAvailablePanels = useMemo(() => panels.filter((p) => p.safetyStatus !== 'excluded'), [panels]);
   const excludedPanels = useMemo(() => panels.filter((p) => p.safetyStatus === 'excluded'), [panels]);
-
-  if (!isOpen) return null;
 
   const sr = window.api.safeRecap;
 
@@ -283,10 +316,17 @@ export default function SafeRecapModal({ isOpen, onClose, onSuccessNotice }: Pro
     try {
       const res = await sr.setupEnv();
       setEnvStatus(res);
-      if (res.ok) setStatusMsg('✓ Локал ONNX шүүгч бэлэн боллоо!');
-      else setErrorMsg(res.error || 'Суулгалтад алдаа гарлаа.');
+      if (res.ok) {
+        setStatusMsg('✓ Локал ONNX шүүгч бэлэн боллоо!');
+        if (!isOpenRef.current) onSuccessNotice?.('🛡️ Safe +18: Локал ONNX шүүгч бэлэн боллоо!');
+      } else {
+        setErrorMsg(res.error || 'Суулгалтад алдаа гарлаа.');
+        if (!isOpenRef.current) onSuccessNotice?.(`⚠️ Safe +18 алдаа: ${res.error || 'Суулгалтад алдаа гарлаа.'}`);
+      }
     } catch (e: any) {
-      setErrorMsg(e?.message || String(e));
+      const msg = e?.message || String(e);
+      setErrorMsg(msg);
+      if (!isOpenRef.current) onSuccessNotice?.(`⚠️ Safe +18 алдаа: ${msg}`);
     } finally {
       setBusy(false);
       setProgressPct(null);
@@ -335,7 +375,8 @@ export default function SafeRecapModal({ isOpen, onClose, onSuccessNotice }: Pro
         const sCount = res.panels.filter((p) => p.safetyStatus === 'safe').length;
         const mCount = res.panels.filter((p) => p.safetyStatus === 'cropped' || p.safetyStatus === 'blurred').length;
         const xCount = res.panels.filter((p) => p.safetyStatus === 'excluded').length;
-        setStatusMsg(`✓ Шүүлт дууслаа: 🟢 ${sCount} аюулгүй · 🟡 ${mCount} тайрсан/blur · 🔴 ${xCount} хассан`);
+        const summary = `✓ Шүүлт дууслаа: 🟢 ${sCount} аюулгүй · 🟡 ${mCount} тайрсан/blur · 🔴 ${xCount} хассан`;
+        setStatusMsg(summary);
 
         let nextPlan = plan;
         if (beats.length > 0 && res.panels.some((p) => p.safetyStatus !== 'excluded')) {
@@ -348,11 +389,16 @@ export default function SafeRecapModal({ isOpen, onClose, onSuccessNotice }: Pro
           setPlan(nextPlan);
         }
         await persistSession({ panels: res.panels, plan: nextPlan }, ['safety']);
+        if (!isOpenRef.current) onSuccessNotice?.(`🛡️ Safe +18 ${summary}`);
       } else {
-        setErrorMsg(res.error || 'Локал шүүлт амжилтгүй боллоо.');
+        const msg = res.error || 'Локал шүүлт амжилтгүй боллоо.';
+        setErrorMsg(msg);
+        if (!isOpenRef.current) onSuccessNotice?.(`⚠️ Safe +18 алдаа: ${msg}`);
       }
     } catch (e: any) {
-      setErrorMsg(e?.message || String(e));
+      const msg = e?.message || String(e);
+      setErrorMsg(msg);
+      if (!isOpenRef.current) onSuccessNotice?.(`⚠️ Safe +18 алдаа: ${msg}`);
     } finally {
       setBusy(false);
       setProgressPct(null);
@@ -423,7 +469,8 @@ export default function SafeRecapModal({ isOpen, onClose, onSuccessNotice }: Pro
         }
 
         const warnNote = res.whisperWarning ? ` (${res.whisperWarning})` : '';
-        setStatusMsg(`✓ Дуу (${clock(dur)}) → ${method} → ${res.beats.length} цэвэр хадмал бэлэн боллоо!${warnNote}`);
+        const summary = `✓ Дуу (${clock(dur)}) → ${method} → ${res.beats.length} цэвэр хадмал бэлэн боллоо!${warnNote}`;
+        setStatusMsg(summary);
 
         const stages = ['voice', ...(dBeats.length ? ['whisper'] : []), ...(method.includes('script-fix') ? ['fix'] : [])];
         await persistSession(
@@ -439,11 +486,16 @@ export default function SafeRecapModal({ isOpen, onClose, onSuccessNotice }: Pro
           },
           stages
         );
+        if (!isOpenRef.current) onSuccessNotice?.(`🛡️ Safe +18: ${summary}`);
       } else {
-        setErrorMsg(res.error || 'Дуу ба хадмал үүсгэж чадсангүй.');
+        const msg = res.error || 'Дуу ба хадмал үүсгэж чадсангүй.';
+        setErrorMsg(msg);
+        if (!isOpenRef.current) onSuccessNotice?.(`⚠️ Safe +18 алдаа: ${msg}`);
       }
     } catch (e: any) {
-      setErrorMsg(e?.message || String(e));
+      const msg = e?.message || String(e);
+      setErrorMsg(msg);
+      if (!isOpenRef.current) onSuccessNotice?.(`⚠️ Safe +18 алдаа: ${msg}`);
     } finally {
       setBusy(false);
       setProgressPct(null);
@@ -558,15 +610,19 @@ export default function SafeRecapModal({ isOpen, onClose, onSuccessNotice }: Pro
           );
           setPanels(nextPanels);
         }
-        setStatusMsg(
-          `✓ Зассан хадмалтай зургуудыг таарууллаа (${res.plan.length} мөр)${blockedCount ? ` · ${blockedCount} сэжигтэй кадр нэмэлтээр хасагдлаа` : ''}.`
-        );
+        const summary = `✓ Зассан хадмалтай зургуудыг таарууллаа (${res.plan.length} мөр)${blockedCount ? ` · ${blockedCount} сэжигтэй кадр нэмэлтээр хасагдлаа` : ''}.`;
+        setStatusMsg(summary);
         await persistSession({ panels: nextPanels, plan: res.plan, subtitles: activeBeats }, ['align']);
+        if (!isOpenRef.current) onSuccessNotice?.(`🛡️ Safe +18: ${summary}`);
       } else {
-        setErrorMsg(res.error || 'AI тааруулалтад алдаа гарлаа.');
+        const msg = res.error || 'AI тааруулалтад алдаа гарлаа.';
+        setErrorMsg(msg);
+        if (!isOpenRef.current) onSuccessNotice?.(`⚠️ Safe +18 алдаа: ${msg}`);
       }
     } catch (e: any) {
-      setErrorMsg(e?.message || String(e));
+      const msg = e?.message || String(e);
+      setErrorMsg(msg);
+      if (!isOpenRef.current) onSuccessNotice?.(`⚠️ Safe +18 алдаа: ${msg}`);
     } finally {
       setBusy(false);
       setProgressPct(null);
@@ -736,6 +792,8 @@ export default function SafeRecapModal({ isOpen, onClose, onSuccessNotice }: Pro
         addCaptions: includeCaptions
       });
       onSuccessNotice?.(`🛡️ ${mat.plan.length} аюулгүй кадр Timeline дээр буулаа!`);
+      setBusy(false);
+      setProgressPct(null);
       onClose();
     } catch (e: any) {
       setErrorMsg(e?.message || String(e));
@@ -749,13 +807,17 @@ export default function SafeRecapModal({ isOpen, onClose, onSuccessNotice }: Pro
 
   return (
     <div
+      role={isOpen ? 'dialog' : undefined}
+      aria-modal={isOpen ? 'true' : undefined}
+      aria-hidden={!isOpen || undefined}
+      aria-label={isOpen ? 'Safe +18 Webtoon Recap Studio' : undefined}
       style={{
         position: 'fixed',
         inset: 0,
         backgroundColor: 'rgba(0,0,0,0.88)',
         backdropFilter: 'blur(10px)',
         zIndex: 9998,
-        display: 'flex',
+        display: isOpen ? 'flex' : 'none',
         alignItems: 'center',
         justifyContent: 'center',
         padding: 12
@@ -880,9 +942,33 @@ export default function SafeRecapModal({ isOpen, onClose, onSuccessNotice }: Pro
               💾 Түүхэд хадгалах
             </button>
 
+            {onMinimize && (
+              <button
+                type="button"
+                onClick={onMinimize}
+                title="Цонхыг хурааж ард ажиллуулах (шүүлт болон дуу боловсруулалт үргэлжилнэ)"
+                style={{
+                  padding: '5px 10px',
+                  borderRadius: 6,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  border: '1px solid rgba(56,189,248,0.4)',
+                  background: 'rgba(56,189,248,0.16)',
+                  color: '#7dd3fc'
+                }}
+              >
+                🗕 Ард ажиллуулах
+              </button>
+            )}
+
             <button
               type="button"
-              onClick={onClose}
+              onClick={() => {
+                if (busy && onMinimize) onMinimize();
+                else onClose();
+              }}
+              title={busy ? 'Ажил ард үргэлжилнэ (Цонхыг хураана)' : 'Хаах'}
               style={{ background: 'none', border: 'none', color: '#a1a1aa', fontSize: 20, cursor: 'pointer', padding: 4 }}
             >
               ✕
@@ -1916,9 +2002,30 @@ export default function SafeRecapModal({ isOpen, onClose, onSuccessNotice }: Pro
             Timeline руу буулгахад зөвхөн Crop/Blur хийгдсэн цэвэр зургууд л орно (бүх шат Түүх хэсэгт хадгалагдана).
           </div>
           <div style={{ display: 'flex', gap: 10 }}>
+            {onMinimize && (
+              <button
+                type="button"
+                onClick={onMinimize}
+                style={{
+                  padding: '8px 14px',
+                  borderRadius: 7,
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  border: '1px solid rgba(56,189,248,0.4)',
+                  background: 'rgba(56,189,248,0.14)',
+                  color: '#7dd3fc'
+                }}
+              >
+                🗕 Ард үлдээж өөр ажил хийх
+              </button>
+            )}
             <button
               type="button"
-              onClick={onClose}
+              onClick={() => {
+                if (busy && onMinimize) onMinimize();
+                else onClose();
+              }}
               style={{
                 padding: '8px 16px',
                 borderRadius: 7,
@@ -1929,7 +2036,7 @@ export default function SafeRecapModal({ isOpen, onClose, onSuccessNotice }: Pro
                 color: '#e4e4e7'
               }}
             >
-              Хаах
+              {busy ? 'Ард хураах' : 'Хаах'}
             </button>
             <button
               type="button"

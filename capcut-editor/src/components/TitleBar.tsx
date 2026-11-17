@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { Icon } from '../Icons';
+import type { AutoPipelineBgState, SafeRecapBgState } from '../types';
 import { useEditor } from '../store';
 
-export default function TitleBar({ onExport, onSave, onOpen, onNew, onClose, onOpenProjects, onGoHome }: {
-  onExport: () => void; onSave: (saveAs?:boolean) => void; onOpen: () => void; onNew: () => void; onClose: () => void; onOpenProjects: () => void; onGoHome: () => void;
+export default function TitleBar({ onExport, onSave, onOpen, onNew, onClose, onOpenProjects, onGoHome, autoPipelineBg, safeRecapBg }: {
+  onExport: () => void; onSave: (saveAs?:boolean) => void; onOpen: () => void; onNew: () => void; onClose: () => void; onOpenProjects: () => void; onGoHome: () => void; autoPipelineBg?: AutoPipelineBgState | null; safeRecapBg?: SafeRecapBgState | null;
 }) {
   const [menu, setMenu] = useState(false);
   const name = useEditor(s => s.projectName), dirty = useEditor(s => s.dirty);
@@ -133,15 +134,25 @@ export default function TitleBar({ onExport, onSave, onOpen, onNew, onClose, onO
         padding: '4px 10px',
         fontSize: 12,
         fontWeight: 700,
-        background: 'linear-gradient(135deg, rgba(16,185,129,0.18) 0%, rgba(59,130,246,0.18) 100%)',
-        border: '1px solid rgba(16,185,129,0.45)',
+        background: autoPipelineBg?.status === 'running'
+          ? 'linear-gradient(135deg, rgba(16,185,129,0.32) 0%, rgba(59,130,246,0.32) 100%)'
+          : 'linear-gradient(135deg, rgba(16,185,129,0.18) 0%, rgba(59,130,246,0.18) 100%)',
+        border: autoPipelineBg?.status === 'running'
+          ? '1px solid rgba(56,189,248,0.85)'
+          : '1px solid rgba(16,185,129,0.45)',
         borderRadius: 'var(--radius-sm)',
         color: '#6ee7b7'
       }}
       title="Script + Video + SRT → Voice → Whisper → Засвар → Auto-Cut → Авто Export"
     >
       <span>🚀</span>
-      <span>1-Click Авто</span>
+      <span>
+        {autoPipelineBg?.status === 'running'
+          ? `Авто · ${autoPipelineBg.overallPct}%`
+          : autoPipelineBg?.status === 'completed'
+          ? 'Авто · ✓'
+          : '1-Click Авто'}
+      </span>
     </button>
     <button
       type="button"
@@ -154,17 +165,21 @@ export default function TitleBar({ onExport, onSave, onOpen, onNew, onClose, onO
         padding: '4px 10px',
         fontSize: 12,
         fontWeight: 700,
-        background: 'rgba(16,185,129,0.14)',
-        border: '1px solid rgba(16,185,129,0.4)',
+        background: safeRecapBg?.busy ? 'rgba(245,158,11,0.24)' : 'rgba(16,185,129,0.14)',
+        border: safeRecapBg?.busy ? '1px solid rgba(245,158,11,0.8)' : '1px solid rgba(16,185,129,0.4)',
         borderRadius: 'var(--radius-sm)',
-        color: '#6ee7b7',
+        color: safeRecapBg?.busy ? '#fcd34d' : '#6ee7b7',
         cursor: 'pointer',
         WebkitAppRegion: 'no-drag'
       } as React.CSSProperties}
       title="+18 хэсгийг гаргалгүй (Crop + Blur) вебтүүн рекап хийх тусдаа студи"
     >
       <span>🛡️</span>
-      <span>Safe +18 Recap</span>
+      <span>
+        {safeRecapBg?.busy
+          ? `+18 · ${safeRecapBg.progressPct != null ? `${safeRecapBg.progressPct}%` : '...'}`
+          : 'Safe +18 Recap'}
+      </span>
     </button>
     <div className="title-project"><input aria-label="Project name" value={name} onChange={e => rename(e.target.value)} onFocus={() => useEditor.getState().beginGesture()} onBlur={() => useEditor.getState().endGesture()} /><span className="save-state">{dirty ? '● Хадгалагдаагүй' : '✓ Автоматаар хадгалагдсан'}</span></div>
     <div className="titlebar-actions">

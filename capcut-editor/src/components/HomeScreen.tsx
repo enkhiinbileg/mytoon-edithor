@@ -13,9 +13,12 @@ import {
   showProjectInFolder
 } from '../project';
 import type { ProjectMeta } from '../project-types';
+import type { AutoPipelineBgState, SafeRecapBgState } from '../types';
 
 interface HomeScreenProps {
   onEnterEditor: () => void;
+  autoPipelineBg?: AutoPipelineBgState | null;
+  safeRecapBg?: SafeRecapBgState | null;
 }
 
 function formatFileSize(bytes?: number): string {
@@ -55,7 +58,7 @@ interface ContextMenuState {
   project: ProjectMeta;
 }
 
-export default function HomeScreen({ onEnterEditor }: HomeScreenProps) {
+export default function HomeScreen({ onEnterEditor, autoPipelineBg, safeRecapBg }: HomeScreenProps) {
   const currentProjectId = useEditor((s) => s.currentProjectId);
   const [projects, setProjects] = useState<ProjectMeta[]>([]);
   const [search, setSearch] = useState('');
@@ -553,12 +556,17 @@ export default function HomeScreen({ onEnterEditor }: HomeScreenProps) {
             style={{
               display: 'flex',
               alignItems: 'center',
-              gap: 10,
+              justifyContent: 'space-between',
+              gap: 8,
               padding: '8px 12px',
               borderRadius: 6,
               color: '#ecfdf5',
-              background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.25) 0%, rgba(59, 130, 246, 0.25) 100%)',
-              border: '1px solid rgba(16, 185, 129, 0.45)',
+              background: autoPipelineBg?.status === 'running'
+                ? 'linear-gradient(135deg, rgba(16, 185, 129, 0.4) 0%, rgba(59, 130, 246, 0.4) 100%)'
+                : 'linear-gradient(135deg, rgba(16, 185, 129, 0.25) 0%, rgba(59, 130, 246, 0.25) 100%)',
+              border: autoPipelineBg?.status === 'running'
+                ? '1px solid rgba(56, 189, 248, 0.85)'
+                : '1px solid rgba(16, 185, 129, 0.45)',
               fontSize: 13,
               textAlign: 'left',
               marginTop: 6,
@@ -567,8 +575,45 @@ export default function HomeScreen({ onEnterEditor }: HomeScreenProps) {
             }}
             title="Script + Video + SRT өгөөд Voice → Groq Whisper → Засвар → Auto-Cut → Авто Export"
           >
-            <span style={{ fontSize: 15 }}>🚀</span>
-            <span style={{ fontWeight: 700 }}>1-Click Авто Видео</span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 15 }}>🚀</span>
+              <span style={{ fontWeight: 700 }}>1-Click Авто Видео</span>
+            </span>
+            {autoPipelineBg?.status === 'running' && (
+              <span style={{ fontSize: 11, fontWeight: 800, color: '#7dd3fc' }}>{autoPipelineBg.overallPct}%</span>
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => window.dispatchEvent(new CustomEvent('open-safe-recap'))}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 8,
+              padding: '8px 12px',
+              borderRadius: 6,
+              color: safeRecapBg?.busy ? '#fde68a' : '#d1fae5',
+              background: safeRecapBg?.busy ? 'rgba(245, 158, 11, 0.22)' : 'rgba(16, 185, 129, 0.14)',
+              border: safeRecapBg?.busy ? '1px solid rgba(245, 158, 11, 0.7)' : '1px solid rgba(16, 185, 129, 0.35)',
+              fontSize: 13,
+              textAlign: 'left',
+              marginTop: 2,
+              cursor: 'pointer',
+              transition: 'all 0.15s'
+            }}
+            title="+18 хэсгийг гаргалгүй (Crop + Blur) вебтүүн рекап хийх тусдаа студи"
+          >
+            <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 15 }}>🛡️</span>
+              <span style={{ fontWeight: 700 }}>Safe +18 Recap</span>
+            </span>
+            {safeRecapBg?.busy && (
+              <span style={{ fontSize: 11, fontWeight: 800, color: '#fcd34d' }}>
+                {safeRecapBg.progressPct != null ? `${safeRecapBg.progressPct}%` : '...'}
+              </span>
+            )}
           </button>
 
           {/* Spacer */}

@@ -69,6 +69,20 @@ function appendFilterComplex(args, graphString, tempFiles) {
   args.push(opt, scriptPath);
 }
 
+function bindExportProcess(proc, signal, trackGlobal) {
+  if (trackGlobal) activeExportProcess = proc;
+  let onAbort = null;
+  if (signal) {
+    onAbort = () => { try { proc.kill(); } catch {} };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  }
+  return () => {
+    if (trackGlobal && activeExportProcess === proc) activeExportProcess = null;
+    if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+  };
+}
+
 function cancelExport() {
   if (activeExportProcess) {
     try {
@@ -561,7 +575,12 @@ function videoEncodingArgs(spec, encoder) {
 }
 
 /** Render absolute timeline positions, including gaps, stacked tracks, and CapCut export specifications. */
-async function exportTimeline(spec, onProgress) {
+async function exportTimeline(spec, onProgress, options = {}) {
+  const signal = options?.signal || null;
+  const trackGlobal = !signal;
+  if (signal?.aborted) {
+    throw Object.assign(new Error('Хэрэглэгч зогсоолоо.'), { name: 'AbortError' });
+  }
   const backend = await getExportBackend(spec.codec || 'hevc');
   const FFMPEG = backend.binary;
   const {clips = [], audio = [], overlays = [], width, height, fps, outPath} = spec;
@@ -649,11 +668,15 @@ async function exportTimeline(spec, onProgress) {
     args.push('-progress', 'pipe:1', '-nostats', outPath);
 
     return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        for (const file of tempFiles) { try { fs.unlinkSync(file); } catch {} }
+        return reject(Object.assign(new Error('Хэрэглэгч зогсоолоо.'), { name: 'AbortError' }));
+      }
       const proc = spawn(FFMPEG, args, { windowsHide: true });
-      activeExportProcess = proc;
+      const unbind = bindExportProcess(proc, signal, trackGlobal);
       let stderr = '', progress = '';
       const cleanup = () => {
-        activeExportProcess = null;
+        unbind();
         for (const file of tempFiles) { try { fs.unlinkSync(file); } catch {} }
       };
       proc.stdout.on('data', b => {
@@ -770,9 +793,10 @@ async function exportTimeline(spec, onProgress) {
       sequenceDir = fs.mkdtempSync(path.join(OVERLAY_DIR, 'recap-sequence-'));
       const prepared = await normalizeSimpleSequence({ clips: sorted, width, height, fps, duration,
         workDir: sequenceDir, ffmpeg: FFMPEG, ffprobe: FFPROBE,
-        onProcess: (proc) => { activeExportProcess = proc; }, onProgress,
+        onProcess: (proc) => { if (trackGlobal) activeExportProcess = proc; }, onProgress,
         encodeArgs: copySequenceVideo ? videoEncodingArgs(spec, encoder) : undefined,
-        overlays: copySequenceVideo ? overlays : [] });
+        overlays: copySequenceVideo ? overlays : [],
+        signal });
       args.push('-f', 'concat', '-safe', '0', '-i', prepared.manifest);
       const concatInput = index++;
       const baseFit = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`;
@@ -936,8 +960,13 @@ async function exportTimeline(spec, onProgress) {
     onProgress?.({ pct: copySequenceVideo ? 95 : isConcatDemuxerEligible ? 50 : 0,
       encoder, stage: copySequenceVideo ? 'mux-audio' : 'encode-video' });
     return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        for (const file of tempFiles) { try { fs.unlinkSync(file); } catch {} }
+        cleanupSequence();
+        return reject(Object.assign(new Error('Хэрэглэгч зогсоолоо.'), { name: 'AbortError' }));
+      }
       const proc = spawn(FFMPEG, args, { windowsHide: true });
-      activeExportProcess = proc;
+      const unbind = bindExportProcess(proc, signal, trackGlobal);
       let stderr = '', progress = '';
       let measuredSpeed = 0, measuredFps = 0;
       proc.stdout.on('data', b => {
@@ -968,7 +997,7 @@ async function exportTimeline(spec, onProgress) {
       });
       proc.stderr.on('data', b => { stderr = (stderr + b.toString()).slice(-12000); });
       const cleanup = () => {
-        activeExportProcess = null;
+        unbind();
         for (const file of tempFiles) { try { fs.unlinkSync(file); } catch {} }
         cleanupSequence();
       };

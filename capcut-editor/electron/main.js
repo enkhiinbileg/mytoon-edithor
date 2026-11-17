@@ -1220,7 +1220,6 @@ ipcMain.handle('auto-pipeline:resume', async (_e, { jobId, specOverrides = {} })
 
 ipcMain.handle('auto-pipeline:cancel', () => {
   autoPipelineController?.abort();
-  try { ff.cancelExport(); } catch {}
   return true;
 });
 

@@ -189,7 +189,7 @@ async function analyzePanels({
       const proc = spawn(
         pyExe,
         [scriptPath, '--mode', 'analyze', '--input', manifestPath, '--output', resultPath],
-        { windowsHide: true, env: { ...process.env, ORT_LOG_SEVERITY_LEVEL: '3', PYTHONIOENCODING: 'utf-8' } }
+        { windowsHide: true, env: { ...process.env, ORT_LOG_SEVERITY_LEVEL: '4', PYTHONIOENCODING: 'utf-8' } }
       );
 
       let buf = '';
@@ -306,7 +306,7 @@ async function recheckSingleImage({ app, imagePath, strictness = 'balanced' }) {
       {
         windowsHide: true,
         timeout: 45000,
-        env: { ...process.env, ORT_LOG_SEVERITY_LEVEL: '3', PYTHONIOENCODING: 'utf-8' }
+        env: { ...process.env, ORT_LOG_SEVERITY_LEVEL: '4', PYTHONIOENCODING: 'utf-8' }
       },
       (err, stdout) => {
         if (err) {

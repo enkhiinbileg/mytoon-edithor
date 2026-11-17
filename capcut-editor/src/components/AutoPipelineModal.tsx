@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
+  AutoPipelineBgState,
   AutoPipelineJobSummary,
   AutoPipelinePreflightResult,
   AutoPipelineProgress,
@@ -44,6 +45,8 @@ interface SrtSlicePreviewState {
 interface Props {
   isOpen: boolean;
   onClose: () => void;
+  onMinimize?: () => void;
+  onBackgroundStateChange?: (state: AutoPipelineBgState) => void;
   onOpenProject?: (projectId?: string | null, projectPath?: string | null) => Promise<void>;
   onSuccessNotice?: (msg: string) => void;
 }
@@ -335,8 +338,17 @@ function SrtBoundPicker({
   );
 }
 
-export default function AutoPipelineModal({ isOpen, onClose, onOpenProject, onSuccessNotice }: Props) {
+export default function AutoPipelineModal({
+  isOpen,
+  onClose,
+  onMinimize,
+  onBackgroundStateChange,
+  onOpenProject,
+  onSuccessNotice
+}: Props) {
   const [activeTab, setActiveTab] = useState<'single' | 'batch' | 'history'>('single');
+  const isOpenRef = useRef(isOpen);
+  isOpenRef.current = isOpen;
 
   // Primary 3 inputs
   const [scriptText, setScriptText] = useState('');
@@ -504,6 +516,12 @@ export default function AutoPipelineModal({ isOpen, onClose, onOpenProject, onSu
     if (!isOpen) return;
     let alive = true;
 
+    if (settingsLoadedRef.current) {
+      refreshPoolAndKeys();
+      loadHistory();
+      return () => { alive = false; };
+    }
+
     Promise.all([
       window.api.readSettings?.().catch(() => null),
       window.api.getElevenKeyPool?.().catch(() => null),
@@ -561,7 +579,7 @@ export default function AutoPipelineModal({ isOpen, onClose, onOpenProject, onSu
 
   // Persist user preferences cleanly in settings.json
   useEffect(() => {
-    if (!isOpen || !settingsLoadedRef.current) return;
+    if (!settingsLoadedRef.current) return;
     const t = setTimeout(() => {
       window.api.updateSettings?.({
         autoPipeline: {
@@ -593,7 +611,7 @@ export default function AutoPipelineModal({ isOpen, onClose, onOpenProject, onSu
     }, 350);
     return () => clearTimeout(t);
   }, [
-    isOpen, voiceId, elevenModelId, speed, stability, similarity, autoTagScript, tagIntensity,
+    voiceId, elevenModelId, speed, stability, similarity, autoTagScript, tagIntensity,
     whisperModel, compactCaptions, geminiModel, resolution, aspect, fps, codec,
     bitrateOption, customBitrate, bitrateType, quality,
     format, audioBitrate, exportDir, saveProjectToLibrary, openProjectAfterExport
@@ -601,7 +619,7 @@ export default function AutoPipelineModal({ isOpen, onClose, onOpenProject, onSu
 
   // Live SRT slice preview when SRT file or start/end time changes
   useEffect(() => {
-    if (!isOpen || !srtInfo?.path) {
+    if (!srtInfo?.path) {
       setSrtPreview(null);
       return;
     }
@@ -639,10 +657,10 @@ export default function AutoPipelineModal({ isOpen, onClose, onOpenProject, onSu
       }).catch(() => {});
     }, 220);
     return () => { active = false; clearTimeout(t); };
-  }, [isOpen, srtInfo, srtStartTime, srtEndTime]);
+  }, [srtInfo, srtStartTime, srtEndTime]);
 
+  // Keep progress subscription alive even when minimized to background
   useEffect(() => {
-    if (!isOpen) return;
     const unsub = window.api.onAutoPipelineProgress?.((p) => {
       setProgress(p);
       if (p.jobId) setActiveJobId(p.jobId);
@@ -657,9 +675,39 @@ export default function AutoPipelineModal({ isOpen, onClose, onOpenProject, onSu
       }
     });
     return () => { unsub?.(); };
-  }, [isOpen]);
+  }, []);
 
-  if (!isOpen) return null;
+  // Report live status to App for floating background dock & TitleBar badges
+  useEffect(() => {
+    if (!onBackgroundStateChange) return;
+    const activeBatchItem = batchQueue.find((b) => b.status === 'running');
+    const batchCompleted = batchQueue.filter((b) => b.status === 'completed').length;
+    const isRunning = running || batchRunning;
+
+    let status: AutoPipelineBgState['status'] = 'idle';
+    if (isRunning) status = 'running';
+    else if (result?.ok) status = 'completed';
+    else if (result?.canceled) status = 'canceled';
+    else if (result && !result.ok) status = 'failed';
+    else if (batchQueue.length > 0 && batchCompleted === batchQueue.length) status = 'completed';
+
+    onBackgroundStateChange({
+      running,
+      batchRunning,
+      overallPct: status === 'completed' ? 100 : (progress?.overallPct ?? 0),
+      stepIndex: progress?.stepIndex ?? 0,
+      stepKey: progress?.stepKey,
+      message: progress?.message || (result?.ok ? 'Бүх шат амжилттай дууслаа!' : result?.error || ''),
+      outputName: activeBatchItem?.outputName || outputName.trim() || videoInfo?.name || '',
+      batchCompleted,
+      batchTotal: batchQueue.length,
+      status,
+      outPath: result?.outPath,
+      error: result?.error,
+      savedProjectId: result?.savedProjectId,
+      savedProjectPath: result?.savedProjectPath
+    });
+  }, [onBackgroundStateChange, running, batchRunning, progress, result, outputName, videoInfo, batchQueue]);
 
   const buildSpec = (overrides?: Partial<AutoPipelineSpec>): AutoPipelineSpec => {
     const mode = bitrateOption === 'custom' ? bitrateType : bitrateOption;
@@ -857,9 +905,11 @@ export default function AutoPipelineModal({ isOpen, onClose, onOpenProject, onSu
       await Promise.all([loadHistory(), refreshPoolAndKeys()]);
       if (res.ok) {
         onSuccessNotice?.(`✨ Авто эвлүүлэг ба экспорт бэлэн: ${res.outPath}`);
-        if (openProjectAfterExport && onOpenProject && (res.savedProjectId || res.savedProjectPath)) {
+        if (openProjectAfterExport && onOpenProject && isOpenRef.current && (res.savedProjectId || res.savedProjectPath)) {
           await onOpenProject(res.savedProjectId, res.savedProjectPath);
         }
+      } else if (!isOpenRef.current) {
+        onSuccessNotice?.(res.canceled ? '⛔ Бүрэн авто процесс зогсоогдлоо.' : `❌ Бүрэн авто алдаа: ${res.error || 'Алдаа гарлаа'}`);
       }
     } finally {
       setRunning(false);
@@ -877,9 +927,11 @@ export default function AutoPipelineModal({ isOpen, onClose, onOpenProject, onSu
       await Promise.all([loadHistory(), refreshPoolAndKeys()]);
       if (res.ok) {
         onSuccessNotice?.(`✨ Сэргээж дуусгав: ${res.outPath}`);
-        if (openProjectAfterExport && onOpenProject && (res.savedProjectId || res.savedProjectPath)) {
+        if (openProjectAfterExport && onOpenProject && isOpenRef.current && (res.savedProjectId || res.savedProjectPath)) {
           await onOpenProject(res.savedProjectId, res.savedProjectPath);
         }
+      } else if (!isOpenRef.current) {
+        onSuccessNotice?.(res.canceled ? '⛔ Бүрэн авто процесс зогсоогдлоо.' : `❌ Бүрэн авто алдаа: ${res.error || 'Алдаа гарлаа'}`);
       }
     } finally {
       setRunning(false);
@@ -954,6 +1006,9 @@ export default function AutoPipelineModal({ isOpen, onClose, onOpenProject, onSu
         if (res.canceled) break;
       }
       await loadHistory();
+      if (!isOpenRef.current) {
+        onSuccessNotice?.('✨ Багц авто видео боловсруулалт дууслаа!');
+      }
     } finally {
       setBatchRunning(false);
     }
@@ -963,16 +1018,17 @@ export default function AutoPipelineModal({ isOpen, onClose, onOpenProject, onSu
 
   return (
     <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="Бүрэн Авто Видео Үйлдвэр"
+      role={isOpen ? 'dialog' : undefined}
+      aria-modal={isOpen ? 'true' : undefined}
+      aria-hidden={!isOpen || undefined}
+      aria-label={isOpen ? 'Бүрэн Авто Видео Үйлдвэр' : undefined}
       style={{
         position: 'fixed',
         inset: 0,
         zIndex: 9999,
         background: 'rgba(6, 9, 19, 0.82)',
         backdropFilter: 'blur(8px)',
-        display: 'flex',
+        display: isOpen ? 'flex' : 'none',
         alignItems: 'center',
         justifyContent: 'center',
         padding: 18
@@ -1070,11 +1126,36 @@ export default function AutoPipelineModal({ isOpen, onClose, onOpenProject, onSu
             >
               🕒 Түүх
             </button>
+            {onMinimize && (
+              <button
+                type="button"
+                onClick={onMinimize}
+                title="Цонхыг хурааж ард ажиллуулах (өөр ажил болон +18 хэсэг дээр ажиллах боломжтой)"
+                style={{
+                  padding: '6px 11px',
+                  borderRadius: 8,
+                  fontSize: 11.5,
+                  fontWeight: 700,
+                  whiteSpace: 'nowrap',
+                  border: '1px solid rgba(56,189,248,0.4)',
+                  background: 'rgba(56,189,248,0.16)',
+                  color: '#7dd3fc',
+                  cursor: 'pointer'
+                }}
+              >
+                🗕 Ард ажиллуулах
+              </button>
+            )}
             <button
               type="button"
-              onClick={onClose}
-              disabled={running || batchRunning}
-              title={running || batchRunning ? 'Ажил дуусах эсвэл зогсоосны дараа хаана уу' : 'Хаах'}
+              onClick={() => {
+                if ((running || batchRunning) && onMinimize) {
+                  onMinimize();
+                } else {
+                  onClose();
+                }
+              }}
+              title={running || batchRunning ? 'Цонхыг хурааж ард үргэлжлүүлэх' : 'Хаах'}
               style={{
                 marginLeft: 4,
                 width: 30,
@@ -1084,8 +1165,7 @@ export default function AutoPipelineModal({ isOpen, onClose, onOpenProject, onSu
                 border: 'none',
                 background: 'rgba(255,255,255,0.08)',
                 color: '#cbd5e1',
-                cursor: running || batchRunning ? 'not-allowed' : 'pointer',
-                opacity: running || batchRunning ? 0.45 : 1,
+                cursor: 'pointer',
                 fontSize: 16
               }}
             >
@@ -2501,22 +2581,42 @@ export default function AutoPipelineModal({ isOpen, onClose, onOpenProject, onSu
               </span>
             )}
             {(running || batchRunning) ? (
-              <button
-                type="button"
-                onClick={handleCancel}
-                style={{
-                  padding: '9px 18px',
-                  borderRadius: 8,
-                  border: 'none',
-                  background: '#ef4444',
-                  color: '#fff',
-                  fontSize: 13,
-                  fontWeight: 700,
-                  cursor: 'pointer'
-                }}
-              >
-                ⛔ Зогсоох
-              </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                {onMinimize && (
+                  <button
+                    type="button"
+                    onClick={onMinimize}
+                    style={{
+                      padding: '9px 15px',
+                      borderRadius: 8,
+                      border: '1px solid rgba(56,189,248,0.4)',
+                      background: 'rgba(56,189,248,0.16)',
+                      color: '#7dd3fc',
+                      fontSize: 12.5,
+                      fontWeight: 700,
+                      cursor: 'pointer'
+                    }}
+                  >
+                    🗕 Ард үлдээж өөр ажил хийх
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={handleCancel}
+                  style={{
+                    padding: '9px 18px',
+                    borderRadius: 8,
+                    border: 'none',
+                    background: '#ef4444',
+                    color: '#fff',
+                    fontSize: 13,
+                    fontWeight: 700,
+                    cursor: 'pointer'
+                  }}
+                >
+                  ⛔ Зогсоох
+                </button>
+              </div>
             ) : activeTab === 'single' ? (
               <button
                 type="button"
