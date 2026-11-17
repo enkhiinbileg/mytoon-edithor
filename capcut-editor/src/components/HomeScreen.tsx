@@ -547,6 +547,30 @@ export default function HomeScreen({ onEnterEditor }: HomeScreenProps) {
             </button>
           </div>
 
+          <button
+            type="button"
+            onClick={() => window.dispatchEvent(new CustomEvent('open-auto-pipeline'))}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              padding: '8px 12px',
+              borderRadius: 6,
+              color: '#ecfdf5',
+              background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.25) 0%, rgba(59, 130, 246, 0.25) 100%)',
+              border: '1px solid rgba(16, 185, 129, 0.45)',
+              fontSize: 13,
+              textAlign: 'left',
+              marginTop: 6,
+              cursor: 'pointer',
+              transition: 'all 0.15s'
+            }}
+            title="Script + Video + SRT өгөөд Voice → Groq Whisper → Засвар → Auto-Cut → Авто Export"
+          >
+            <span style={{ fontSize: 15 }}>🚀</span>
+            <span style={{ fontWeight: 700 }}>1-Click Авто Видео</span>
+          </button>
+
           {/* Spacer */}
           <div style={{ flex: 1 }} />
 

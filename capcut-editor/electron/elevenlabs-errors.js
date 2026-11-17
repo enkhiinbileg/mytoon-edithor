@@ -22,8 +22,13 @@ function classifyError(error) {
     /quota_exceeded|insufficient quota|quota exceeded|not enough credits|insufficient_credits|exceeded.*quota|credit.*limit/.test(message)
   ) return 'quota';
   if (error.status === 429 || /rate_limit|concurrent_limit|too_many_concurrent/.test(code)) return 'rate';
-  if (code === 'detected_unusual_activity' || /unusual_activity|blocked|banned/.test(message)) return 'terminal';
-  if ([401, 403, 404, 422].includes(error.status)) return 'terminal';
+  if (
+    code === 'detected_unusual_activity' ||
+    code === 'payment_issue' ||
+    [401, 403].includes(error.status) ||
+    /unusual_activity|blocked|banned|payment_issue|failed or incomplete payment|invalid_api_key/.test(message)
+  ) return 'key_terminal';
+  if ([404, 422].includes(error.status)) return 'terminal';
   return 'transient';
 }
 

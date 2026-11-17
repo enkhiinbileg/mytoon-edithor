@@ -169,6 +169,67 @@ async function ensureProjectCover(projectId, projectData, projectsDirectory) {
   return '';
 }
 
+function getProjectsDir(app) {
+  return path.join(app.getPath('userData'), 'projects');
+}
+
+function readProjectsList(dir) {
+  try {
+    const p = path.join(dir, 'projects.json');
+    if (fs.existsSync(p)) {
+      const list = JSON.parse(fs.readFileSync(p, 'utf8'));
+      if (Array.isArray(list)) return list;
+    }
+  } catch {}
+  return [];
+}
+
+function writeProjectsList(dir, list) {
+  atomicWrite(path.join(dir, 'projects.json'), list);
+}
+
+/**
+ * Save or update a validated Cutline project inside the persistent library.
+ */
+async function saveLibraryProject(app, payload, options = {}) {
+  const dir = getProjectsDir(app);
+  fs.mkdirSync(dir, { recursive: true });
+  const data = validateProject(payload);
+  const id = (options.id && typeof options.id === 'string')
+    ? options.id
+    : ('proj_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6));
+  const filePath = path.join(dir, `${id}.cutline`);
+  atomicWrite(filePath, data);
+
+  const duration = data.clips.reduce((max, c) => Math.max(max, c.start + (c.outPoint - c.inPoint) / Math.max(0.05, c.speed || 1)), 0);
+  const cover = await ensureProjectCover(id, data, dir).catch(() => '');
+  const now = Date.now();
+  const list = readProjectsList(dir);
+  const idx = list.findIndex((p) => p.id === id);
+  const prev = idx >= 0 ? list[idx] : null;
+  const meta = {
+    id,
+    name: data.name,
+    createdAt: prev?.createdAt || now,
+    updatedAt: now,
+    duration,
+    clipCount: data.clips.length,
+    cover: cover || prev?.cover || ''
+  };
+  if (idx >= 0) {
+    list[idx] = meta;
+  } else {
+    list.unshift(meta);
+  }
+  writeProjectsList(dir, list);
+
+  if (options.setActive) {
+    atomicWrite(path.join(app.getPath('userData'), 'active-project.json'), { id });
+  }
+
+  return { ok: true, id, filePath, data, meta };
+}
+
 function registerProjectHandlers({ipcMain,dialog,app,getWindow}) {
   const draft = () => path.join(app.getPath('userData'), 'editor-draft.json');
   const projectsDir = () => path.join(app.getPath('userData'), 'projects');
@@ -574,4 +635,4 @@ function registerProjectHandlers({ipcMain,dialog,app,getWindow}) {
     catch { return null; }
   });
 }
-module.exports = {validateProject,atomicWrite,registerProjectHandlers};
+module.exports = {validateProject,atomicWrite,registerProjectHandlers,saveLibraryProject};

@@ -26,6 +26,10 @@ const appDir = path.join(output,'resources','app');
   }
   await esbuild.build({entryPoints:[path.join(root,'electron','main.js')],outfile:path.join(appDir,'electron','main.js'),bundle:true,platform:'node',target:'node20',external:['electron'],logLevel:'info'});
   fs.copyFileSync(path.join(root,'electron','preload.js'),path.join(appDir,'electron','preload.js'));
+  const safePySrc = path.join(root,'electron','safe-recap','safe_analyzer.py');
+  if (fs.existsSync(safePySrc)) {
+    fs.copyFileSync(safePySrc, path.join(appDir,'electron','safe_analyzer.py'));
+  }
   for (const asset of ['icon.ico', 'logo.png']) {
     const srcAsset = path.join(root, 'electron', asset);
     if (fs.existsSync(srcAsset)) {

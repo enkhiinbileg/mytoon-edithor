@@ -165,6 +165,46 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('image-recap:progress', h);
   },
 
+  // Independent Safe +18 Webtoon Recap Module
+  safeRecap: {
+    checkEnv: () => ipcRenderer.invoke('safe-recap:checkEnv'),
+    setupEnv: () => ipcRenderer.invoke('safe-recap:setupEnv'),
+    pickScriptFile: () => ipcRenderer.invoke('safe-recap:pickScriptFile'),
+    openSrtAndParse: () => ipcRenderer.invoke('safe-recap:openSrtAndParse'),
+    pickAudioFile: () => ipcRenderer.invoke('safe-recap:pickAudioFile'),
+    preparePanels: (spec) => ipcRenderer.invoke('safe-recap:preparePanels', spec),
+    analyzePanels: (spec) => ipcRenderer.invoke('safe-recap:analyzePanels', spec),
+    previewEdit: (spec) => ipcRenderer.invoke('safe-recap:previewEdit', spec),
+    splitScriptToBeats: (spec) => ipcRenderer.invoke('safe-recap:splitScriptToBeats', spec),
+    getWhisperStatus: () => ipcRenderer.invoke('safe-recap:getWhisperStatus'),
+    generateVoiceFromScript: (spec) => ipcRenderer.invoke('safe-recap:generateVoiceFromScript', spec),
+    fixSubtitlesWithScript: (spec) => ipcRenderer.invoke('safe-recap:fixSubtitlesWithScript', spec),
+    align: (spec) => ipcRenderer.invoke('safe-recap:align', spec),
+    materializePlan: (spec) => ipcRenderer.invoke('safe-recap:materializePlan', spec),
+    saveSession: (session) => ipcRenderer.invoke('safe-recap:saveSession', session),
+    loadSession: (sessionId) => ipcRenderer.invoke('safe-recap:loadSession', sessionId),
+    listSessions: () => ipcRenderer.invoke('safe-recap:listSessions'),
+    deleteSession: (sessionId) => ipcRenderer.invoke('safe-recap:deleteSession', sessionId),
+    onProgress: (cb) => {
+      const h = (_e, p) => cb(p);
+      ipcRenderer.on('safe-recap:progress', h);
+      return () => ipcRenderer.removeListener('safe-recap:progress', h);
+    }
+  },
+
+  // 1-Click Full End-to-End Automation Pipeline
+  openVideoFile: () => ipcRenderer.invoke('dialog:openVideo'),
+  preflightAutoPipeline: (spec) => ipcRenderer.invoke('auto-pipeline:preflight', spec),
+  runAutoPipeline: (spec) => ipcRenderer.invoke('auto-pipeline:run', spec),
+  resumeAutoPipeline: (jobId, specOverrides) => ipcRenderer.invoke('auto-pipeline:resume', { jobId, specOverrides }),
+  cancelAutoPipeline: () => ipcRenderer.invoke('auto-pipeline:cancel'),
+  listAutoPipelineJobs: () => ipcRenderer.invoke('auto-pipeline:jobs'),
+  onAutoPipelineProgress: (cb) => {
+    const h = (_e, p) => cb(p);
+    ipcRenderer.on('auto-pipeline:progress', h);
+    return () => ipcRenderer.removeListener('auto-pipeline:progress', h);
+  },
+
   // Absolute path -> URL the renderer can put in <video>/<img>.
   // `media` is registered as a *standard* scheme, and Chromium rejects standard
   // URLs with an empty authority, so a dummy host is required. Each segment is

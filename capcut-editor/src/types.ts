@@ -1,4 +1,17 @@
 import type { ProjectApi, ProjectDocument } from './project-types';
+import type {
+  SafeBeat,
+  SafeCensorBox,
+  SafeCensorMode,
+  SafeCropRect,
+  SafeEnvStatus,
+  SafePanelItem,
+  SafePlanRow,
+  SafeRecapSession,
+  SafeSessionSummary,
+  SafeStrictness,
+  SafeWhisperModel
+} from './safe-recap/types';
 export type MediaKind = 'video' | 'audio' | 'image' | 'unknown';
 export type TrackKind = 'video' | 'audio' | 'overlay';
 
@@ -392,6 +405,80 @@ declare global {
         model?: string;
       }): Promise<{ ok: boolean; plan?: ImagePlanRow[]; error?: string }>;
       onImageRecapProgress(cb: (p: { stage: string; message: string; percent?: number }) => void): () => void;
+      safeRecap?: {
+        checkEnv(): Promise<SafeEnvStatus>;
+        setupEnv(): Promise<SafeEnvStatus>;
+        pickScriptFile(): Promise<{ ok: boolean; canceled?: boolean; path?: string; name?: string; text?: string }>;
+        openSrtAndParse(): Promise<{ ok: boolean; canceled?: boolean; path?: string; name?: string; beats?: SafeBeat[] }>;
+        pickAudioFile(): Promise<{ ok: boolean; canceled?: boolean; path?: string; name?: string; duration?: number }>;
+        preparePanels(spec: { paths: string[]; sliceMode?: 'none' | 'smart'; sessionId?: string }): Promise<{ ok: boolean; panels?: SafePanelItem[]; cacheDir?: string; error?: string }>;
+        analyzePanels(spec: { panels: SafePanelItem[]; sessionId?: string; strictness?: SafeStrictness; defaultCensorMode?: SafeCensorMode }): Promise<{ ok: boolean; panels?: SafePanelItem[]; error?: string }>;
+        previewEdit(spec: {
+          sessionId?: string;
+          panel: SafePanelItem;
+          cropRect: SafeCropRect | null;
+          censorBoxes: SafeCensorBox[];
+          recheck?: boolean;
+          materializeFull?: boolean;
+          strictness?: SafeStrictness;
+        }): Promise<{
+          ok: boolean;
+          previewPath?: string;
+          renderPath?: string;
+          renderWidth?: number;
+          renderHeight?: number;
+          recheck?: { safe: boolean; nsfwScore: number };
+          error?: string;
+        }>;
+        splitScriptToBeats(spec: { scriptText: string; wordsPerSec?: number }): Promise<{ ok: boolean; beats?: SafeBeat[]; duration?: number; error?: string }>;
+        getWhisperStatus(): Promise<{ ok: boolean; available: boolean; models: SafeWhisperModel[]; error?: string }>;
+        generateVoiceFromScript(spec: {
+          sessionId?: string;
+          scriptText: string;
+          voiceId?: string;
+          modelId?: string;
+          stability?: number;
+          similarity?: number;
+          speed?: number;
+          autoTagScript?: boolean;
+          whisperModel?: string;
+        }): Promise<{
+          ok: boolean;
+          audioPath?: string;
+          duration?: number;
+          draftBeats?: SafeBeat[];
+          beats?: SafeBeat[];
+          whisperModelUsed?: string;
+          subtitleMethod?: string;
+          fixMessage?: string;
+          whisperWarning?: string;
+          error?: string;
+        }>;
+        fixSubtitlesWithScript(spec: {
+          scriptText: string;
+          draftBeats: SafeBeat[];
+          audioDuration?: number;
+        }): Promise<{ ok: boolean; beats?: SafeBeat[]; reflowedCount?: number; message?: string; error?: string }>;
+        align(spec: {
+          sessionId?: string;
+          beats: SafeBeat[];
+          panels: SafePanelItem[];
+          audioDuration?: number;
+          aspectRatio?: '16:9' | '9:16';
+          useAi?: boolean;
+          model?: string;
+        }): Promise<{ ok: boolean; plan?: SafePlanRow[]; blockedPanelIds?: string[]; error?: string }>;
+        materializePlan(spec: { sessionId?: string; plan: SafePlanRow[] }): Promise<{ ok: boolean; plan?: SafePlanRow[]; error?: string }>;
+        saveSession(session: SafeRecapSession): Promise<{ ok: boolean; id?: string; path?: string; name?: string; updatedAt?: number; error?: string }>;
+        loadSession(sessionId: string): Promise<{ ok: boolean; session?: SafeRecapSession | null; error?: string }>;
+        listSessions(): Promise<{
+          ok: boolean;
+          sessions?: SafeSessionSummary[];
+          error?: string;
+        }>;
+        deleteSession(sessionId: string): Promise<{ ok: boolean; error?: string }>;
+        onProgress(cb: (p: { stage: string; message: string; percent?: number }) => void): () => void;
+      };
       importCustomFonts(): Promise<{ canceled: boolean; imported?: string[]; fonts: FontCatalog }>;
 
       whisperStatus(): Promise<{
@@ -578,6 +665,24 @@ declare global {
       onRecapCutProgress(cb: (p: { stage?: string; message?: string; requestId?: string }) => void): () => void;
       syncTimelineVoice(spec: any): Promise<any>;
       onVoiceEditProgress(cb: (p: any) => void): () => void;
+      openVideoFile(): Promise<{
+        ok: boolean;
+        path?: string;
+        name?: string;
+        duration?: number;
+        width?: number;
+        height?: number;
+        fps?: number;
+        hasAudio?: boolean;
+        detectedSrtStart?: string;
+        error?: string;
+      } | null>;
+      preflightAutoPipeline(spec: AutoPipelineSpec): Promise<AutoPipelinePreflightResult>;
+      runAutoPipeline(spec: AutoPipelineSpec): Promise<AutoPipelineResult>;
+      resumeAutoPipeline(jobId: string, specOverrides?: Partial<AutoPipelineSpec>): Promise<AutoPipelineResult>;
+      cancelAutoPipeline(): Promise<boolean>;
+      listAutoPipelineJobs(): Promise<{ ok: boolean; jobs: AutoPipelineJobSummary[]; error?: string }>;
+      onAutoPipelineProgress(cb: (p: AutoPipelineProgress) => void): () => void;
       toMediaUrl(filePath: string): string;
     };
   }
@@ -669,4 +774,112 @@ export interface ScriptStudioResult {
   nextSourceOffset?: number;
   visionAIUsed?: boolean;
   visionError?: string;
+}
+
+
+export interface AutoPipelineSpec {
+  scriptText: string;
+  videoPath: string;
+  srtPath: string;
+  srtStartTime?: string;
+  srtEndTime?: string;
+  voiceId?: string;
+  elevenModelId?: string;
+  stability?: number;
+  similarity?: number;
+  speed?: number;
+  chunkSize?: number;
+  autoTagScript?: boolean;
+  tagIntensity?: 'balanced' | 'dramatic';
+  whisperModel?: string;
+  compactCaptions?: boolean;
+  forceFreshWhisper?: boolean;
+  geminiModel?: string;
+  saveProjectToLibrary?: boolean;
+  openProjectAfterExport?: boolean;
+  exportDir?: string;
+  outputName?: string;
+  outPath?: string;
+  exportOptions?: {
+    resolution?: '480P' | '720P' | '1080P' | '2K' | '4K';
+    aspect?: 'auto' | '16:9' | '9:16';
+    fps?: number;
+    codec?: 'hevc' | 'h264' | 'av1';
+    quality?: 'draft' | 'standard' | 'high';
+    bitrateOption?: 'lower' | 'recommended' | 'higher' | 'custom';
+    customBitrate?: number;
+    bitrateType?: 'cbr' | 'vbr';
+    bitrateMode?: 'lower' | 'recommended' | 'higher' | 'cbr' | 'vbr';
+    format?: 'mp4' | 'mov';
+    audioBitrate?: '128k' | '192k' | '320k';
+  };
+}
+
+export interface AutoPipelineProgress {
+  jobId?: string;
+  stepIndex: number;
+  stepKey: 'voice' | 'whisper' | 'fix' | 'autocut' | 'export';
+  pct: number;
+  overallPct: number;
+  voiceDuration?: number;
+  message: string;
+}
+
+export interface AutoPipelinePreflightResult {
+  ok: boolean;
+  error?: string;
+  checks?: { id: string; label: string; ok: boolean; detail: string }[];
+  warnings?: string[];
+  estimate?: {
+    scriptChars: number;
+    cleanScriptChars: number;
+    audioTagCount: number;
+    srtEntries: number;
+    slicedSrtEntries: number;
+    autoDetectedSrtStart: string;
+    poolTotalRemaining: number;
+    targetWidth: number;
+    targetHeight: number;
+    videoDuration: number;
+  };
+}
+
+export interface AutoPipelineResult {
+  ok: boolean;
+  canceled?: boolean;
+  jobId?: string;
+  error?: string;
+  completedStages?: string[];
+  outPath?: string;
+  voiceAudioPath?: string;
+  cleanProject?: ProjectDocument;
+  savedProjectId?: string | null;
+  savedProjectPath?: string | null;
+  report?: {
+    voiceDuration: number;
+    draftCaptionCount: number;
+    fixedCaptionCount: number;
+    finalTextClipCount: number;
+    videoClipCount: number;
+    motionCount: number;
+    freezeCount: number;
+    exportDuration: number;
+    width: number;
+    height: number;
+  };
+}
+
+export interface AutoPipelineJobSummary {
+  jobId: string;
+  createdAt: number;
+  updatedAt: number;
+  status: string;
+  completedStages: string[];
+  error?: string | null;
+  videoPath?: string;
+  srtPath?: string;
+  outputName?: string;
+  outPath?: string;
+  savedProjectId?: string | null;
+  scriptPreview?: string;
 }

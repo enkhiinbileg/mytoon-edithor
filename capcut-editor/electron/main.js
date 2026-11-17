@@ -1120,6 +1120,118 @@ ipcMain.handle('image-recap:align', async (_e, spec) => {
   }
 });
 
+const autoPipeline = require('./auto-recap-pipeline');
+require('./safe-recap/ipc').registerSafeRecapIpc({
+  ipcMain,
+  app,
+  dialog,
+  getWin: () => win,
+  settings,
+  ff
+});
+let autoPipelineController = null;
+app.on('before-quit', () => {
+  autoPipelineController?.abort();
+});
+
+ipcMain.handle('dialog:openVideo', async () => {
+  const res = await dialog.showOpenDialog(win, {
+    title: 'Эх видео файл сонгох',
+    filters: [
+      { name: 'Video Files (*.mp4, *.mov, *.mkv, *.avi, *.webm, *.m4v)', extensions: ['mp4', 'mov', 'mkv', 'avi', 'webm', 'm4v'] },
+      { name: 'All Files (*.*)', extensions: ['*'] }
+    ],
+    properties: ['openFile']
+  });
+  if (res.canceled || !res.filePaths[0]) return null;
+  const filePath = res.filePaths[0];
+  try {
+    const probeInfo = await ff.probe(filePath);
+    if (!probeInfo.hasVideo || !(probeInfo.duration > 0)) {
+      return { ok: false, error: 'Сонгосон файл дүрсний замгүй эсвэл гэмтэлтэй байна.' };
+    }
+    return {
+      ok: true,
+      path: filePath,
+      name: path.basename(filePath),
+      duration: probeInfo.duration || 0,
+      width: probeInfo.width || 0,
+      height: probeInfo.height || 0,
+      fps: probeInfo.fps || 30,
+      hasAudio: Boolean(probeInfo.hasAudio),
+      detectedSrtStart: autoPipeline.detectSrtSliceFromVideoName(filePath)
+    };
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+});
+
+ipcMain.handle('auto-pipeline:preflight', async (_e, spec) => {
+  try {
+    return await autoPipeline.preflightAutoPipeline(spec, { app });
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+});
+
+ipcMain.handle('auto-pipeline:run', async (_e, spec) => {
+  if (autoPipelineController) {
+    return { ok: false, error: 'Бүрэн авто ажил аль хэдийн ажиллаж байна. Дуусахыг хүлээнэ үү эсвэл зогсооно уу.' };
+  }
+  autoPipelineController = new AbortController();
+  try {
+    return await autoPipeline.runAutoPipeline(spec, {
+      app,
+      signal: autoPipelineController.signal,
+      onProgress: (p) => {
+        try {
+          if (win && !win.isDestroyed()) win.webContents.send('auto-pipeline:progress', p);
+        } catch {}
+      }
+    });
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  } finally {
+    autoPipelineController = null;
+  }
+});
+
+ipcMain.handle('auto-pipeline:resume', async (_e, { jobId, specOverrides = {} }) => {
+  if (autoPipelineController) {
+    return { ok: false, error: 'Бүрэн авто ажил аль хэдийн ажиллаж байна. Дуусахыг хүлээнэ үү.' };
+  }
+  autoPipelineController = new AbortController();
+  try {
+    return await autoPipeline.resumeAutoPipeline(jobId, specOverrides, {
+      app,
+      signal: autoPipelineController.signal,
+      onProgress: (p) => {
+        try {
+          if (win && !win.isDestroyed()) win.webContents.send('auto-pipeline:progress', p);
+        } catch {}
+      }
+    });
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  } finally {
+    autoPipelineController = null;
+  }
+});
+
+ipcMain.handle('auto-pipeline:cancel', () => {
+  autoPipelineController?.abort();
+  try { ff.cancelExport(); } catch {}
+  return true;
+});
+
+ipcMain.handle('auto-pipeline:jobs', () => {
+  try {
+    return { ok: true, jobs: autoPipeline.listAutoPipelineJobs(app) };
+  } catch (err) {
+    return { ok: false, jobs: [], error: String(err.message || err) };
+  }
+});
+
 ipcMain.handle('window:minimize', () => win?.minimize());
 ipcMain.handle('window:toggleMaximize', () => {
   if (!win) return false;

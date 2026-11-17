@@ -1465,6 +1465,31 @@ export default function Timeline({ onRequestExport, onQuickExportSelected }: Tim
             gap: 6,
             padding: '4px 12px',
             fontSize: 12,
+            fontWeight: 700,
+            borderRadius: 6,
+            background: 'linear-gradient(135deg, #10b981 0%, #3b82f6 100%)',
+            color: '#fff',
+            cursor: 'pointer',
+            border: 'none',
+            lineHeight: 1.2,
+            boxShadow: '0 2px 10px rgba(16, 185, 129, 0.35)',
+            transition: 'all 0.2s ease'
+          }}
+          title="Script + Video + SRT → Voice → Groq Whisper → Скриптээр засах → Auto-Cut → Авто Export"
+          onClick={() => window.dispatchEvent(new CustomEvent('open-auto-pipeline'))}
+        >
+          <span style={{ fontSize: 13 }}>🚀</span>
+          <span>Бүрэн Авто</span>
+        </button>
+
+        <button
+          className="btn"
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            padding: '4px 12px',
+            fontSize: 12,
             fontWeight: 600,
             borderRadius: 6,
             background: 'linear-gradient(135deg, #ec4899 0%, #8b5cf6 100%)',

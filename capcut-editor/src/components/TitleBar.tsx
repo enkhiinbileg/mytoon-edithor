@@ -54,6 +54,7 @@ export default function TitleBar({ onExport, onSave, onOpen, onNew, onClose, onO
         <button onClick={() => {setMenu(false);onNew();}}>Шинэ төсөл <kbd>Ctrl N</kbd></button>
         <button onClick={() => {setMenu(false);onOpen();}}>Файлаас нээх <kbd>Ctrl O</kbd></button>
         <hr /><button onClick={() => {setMenu(false); window.dispatchEvent(new CustomEvent('open-image-recap'));}}>🎨 Зураг & Хадмал холбогч</button>
+        <button onClick={() => {setMenu(false); window.dispatchEvent(new CustomEvent('open-safe-recap'));}}>🛡️ Safe +18 Вебтүүн Студи</button>
         <button onClick={() => {setMenu(false); window.dispatchEvent(new CustomEvent('open-audio-merger'));}}>🎵 Аудио нэгтгэх (Merge Audio)</button>
         <button onClick={() => {setMenu(false);onSave();}}>Хадгалах <kbd>Ctrl S</kbd></button>
         <button onClick={() => {setMenu(false);onSave(true);}}>Өөр нэрээр хадгалах <kbd>Ctrl Shift S</kbd></button>
@@ -120,6 +121,50 @@ export default function TitleBar({ onExport, onSave, onOpen, onNew, onClose, onO
     >
       <span>🎨</span>
       <span>Зураг & Хадмал студи</span>
+    </button>
+    <button
+      type="button"
+      className="btn ghost"
+      onClick={() => window.dispatchEvent(new CustomEvent('open-auto-pipeline'))}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '4px 10px',
+        fontSize: 12,
+        fontWeight: 700,
+        background: 'linear-gradient(135deg, rgba(16,185,129,0.18) 0%, rgba(59,130,246,0.18) 100%)',
+        border: '1px solid rgba(16,185,129,0.45)',
+        borderRadius: 'var(--radius-sm)',
+        color: '#6ee7b7'
+      }}
+      title="Script + Video + SRT → Voice → Whisper → Засвар → Auto-Cut → Авто Export"
+    >
+      <span>🚀</span>
+      <span>1-Click Авто</span>
+    </button>
+    <button
+      type="button"
+      className="btn ghost"
+      onClick={() => window.dispatchEvent(new CustomEvent('open-safe-recap'))}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '4px 10px',
+        fontSize: 12,
+        fontWeight: 700,
+        background: 'rgba(16,185,129,0.14)',
+        border: '1px solid rgba(16,185,129,0.4)',
+        borderRadius: 'var(--radius-sm)',
+        color: '#6ee7b7',
+        cursor: 'pointer',
+        WebkitAppRegion: 'no-drag'
+      } as React.CSSProperties}
+      title="+18 хэсгийг гаргалгүй (Crop + Blur) вебтүүн рекап хийх тусдаа студи"
+    >
+      <span>🛡️</span>
+      <span>Safe +18 Recap</span>
     </button>
     <div className="title-project"><input aria-label="Project name" value={name} onChange={e => rename(e.target.value)} onFocus={() => useEditor.getState().beginGesture()} onBlur={() => useEditor.getState().endGesture()} /><span className="save-state">{dirty ? '● Хадгалагдаагүй' : '✓ Автоматаар хадгалагдсан'}</span></div>
     <div className="titlebar-actions">

@@ -15,8 +15,10 @@ import ScriptStudioModal from './components/ScriptStudioModal';
 import AudioScriptModal from './components/AudioScriptModal';
 import AudioMergerModal from './components/AudioMergerModal';
 import ImageRecapStudioModal from './components/ImageRecapStudioModal';
+import SafeRecapModal from './safe-recap/SafeRecapModal';
+import AutoPipelineModal from './components/AutoPipelineModal';
 import HomeScreen from './components/HomeScreen';
-import { saveProject, openProject, restoreProject, startProjectAutosave, flushDraft, deleteProject } from './project';
+import { saveProject, openProject, restoreProject, startProjectAutosave, flushDraft, deleteProject, switchToProject } from './project';
 import { importPaths } from './importMedia';
 import { buildOverlays } from './overlayRaster';
 import { effectById, filterById, transitionById } from './looks';
@@ -38,12 +40,16 @@ export default function App() {
   const [audioScriptOpen, setAudioScriptOpen] = useState(false);
   const [audioMergerOpen, setAudioMergerOpen] = useState(false);
   const [imageRecapOpen, setImageRecapOpen] = useState(false);
+  const [safeRecapOpen, setSafeRecapOpen] = useState(false);
+  const [autoPipelineOpen, setAutoPipelineOpen] = useState(false);
 
   useEffect(() => {
     const handleOpenStudio = () => setScriptStudioOpen(true);
     const handleOpenAudioScript = () => setAudioScriptOpen(true);
     const handleOpenAudioMerger = () => setAudioMergerOpen(true);
     const handleOpenImageRecap = () => setImageRecapOpen(true);
+    const handleOpenSafeRecap = () => setSafeRecapOpen(true);
+    const handleOpenAutoPipeline = () => setAutoPipelineOpen(true);
     const handleOpenAutoSync = () => {
       setTab('text');
       setTimeout(() => {
@@ -54,12 +60,16 @@ export default function App() {
     window.addEventListener('open-audio-script', handleOpenAudioScript);
     window.addEventListener('open-audio-merger', handleOpenAudioMerger);
     window.addEventListener('open-image-recap', handleOpenImageRecap);
+    window.addEventListener('open-safe-recap', handleOpenSafeRecap);
+    window.addEventListener('open-auto-pipeline', handleOpenAutoPipeline);
     window.addEventListener('open-auto-sync', handleOpenAutoSync);
     return () => {
       window.removeEventListener('open-script-studio', handleOpenStudio);
       window.removeEventListener('open-audio-script', handleOpenAudioScript);
       window.removeEventListener('open-audio-merger', handleOpenAudioMerger);
       window.removeEventListener('open-image-recap', handleOpenImageRecap);
+      window.removeEventListener('open-safe-recap', handleOpenSafeRecap);
+      window.removeEventListener('open-auto-pipeline', handleOpenAutoPipeline);
       window.removeEventListener('open-auto-sync', handleOpenAutoSync);
     };
   }, []);
@@ -412,10 +422,48 @@ export default function App() {
     : tab === 'dub' ? null
     : <LookPanel mode="filters" />;
 
+  const autoPipelineNode = autoPipelineOpen ? (
+    <AutoPipelineModal
+      isOpen={autoPipelineOpen}
+      onClose={() => setAutoPipelineOpen(false)}
+      onOpenProject={async (projectId, projectPath) => {
+        if (projectId) {
+          await switchToProject(projectId);
+          setAutoPipelineOpen(false);
+          setViewMode('editor');
+          return;
+        }
+        if (projectPath) {
+          const res = await window.api.openProjectPath?.(projectPath);
+          if (res?.ok && res.data) {
+            useEditor.getState().loadProject(res.data, res.path ?? null);
+            setAutoPipelineOpen(false);
+            setViewMode('editor');
+          }
+        }
+      }}
+      onSuccessNotice={(msg) => {
+        setNotice(msg);
+        setTimeout(() => setNotice(null), 6000);
+      }}
+    />
+  ) : null;
+
   if (viewMode === 'home') {
     return (
       <>
         <HomeScreen onEnterEditor={() => setViewMode('editor')} />
+        {autoPipelineNode}
+      {safeRecapOpen && (
+        <SafeRecapModal
+          isOpen={safeRecapOpen}
+          onClose={() => setSafeRecapOpen(false)}
+          onSuccessNotice={(msg) => {
+            setNotice(msg);
+            setTimeout(() => setNotice(null), 6000);
+          }}
+        />
+      )}
         {notice && (
           <div className="toast" role="status" onClick={() => setNotice(null)}>
             {notice}
@@ -510,6 +558,17 @@ export default function App() {
         <ImageRecapStudioModal
           isOpen={imageRecapOpen}
           onClose={() => setImageRecapOpen(false)}
+          onSuccessNotice={(msg) => {
+            setNotice(msg);
+            setTimeout(() => setNotice(null), 6000);
+          }}
+        />
+      )}
+      {autoPipelineNode}
+      {safeRecapOpen && (
+        <SafeRecapModal
+          isOpen={safeRecapOpen}
+          onClose={() => setSafeRecapOpen(false)}
           onSuccessNotice={(msg) => {
             setNotice(msg);
             setTimeout(() => setNotice(null), 6000);

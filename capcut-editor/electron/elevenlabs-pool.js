@@ -167,6 +167,7 @@ async function dispatchPoolTTS({
   speed = 1.0,
   outDir,
   resume = false,
+  signal = null,
   onProgress
 }) {
   if (!Array.isArray(chunks) || chunks.length === 0) {
@@ -222,26 +223,50 @@ async function dispatchPoolTTS({
     }))
     .filter((task) => Boolean(task.text));
 
-  const initialTotal = queue.length;
+  let initialTotal = queue.length;
   const completedResults = [];
   let completedCount = 0;
   let lastQuotaError = '';
   let fatalError = null;
+  if (signal?.aborted) {
+    throw Object.assign(new Error('Хэрэглэгч зогсоолоо.'), { name: 'AbortError' });
+  }
   const controller = new AbortController();
+  const onExternalAbort = () => controller.abort();
+  if (signal) signal.addEventListener('abort', onExternalAbort, { once: true });
   const cache = resume ? createPartCache(outDir, { voiceId, modelId, stability, similarity, speed }) : null;
 
   if (cache) {
     const remainingTasks = [];
     for (const task of queue) {
-      const hit = await cache.read(task.text);
-      if (hit) {
-        completedResults.push({ ...hit, path: task.path });
+      const recovered = cache.recoverSegments
+        ? await cache.recoverSegments(task.text)
+        : (() => cache.read(task.text).then((h) => (h ? [{ type: 'cached', hit: h }] : [{ type: 'missing', text: task.text }])))();
+      const resolvedList = await Promise.resolve(recovered);
+      if (resolvedList.length === 1 && resolvedList[0].type === 'cached') {
+        completedResults.push({ ...resolvedList[0].hit, path: task.path });
         completedCount++;
+      } else if (resolvedList.some((s) => s.type === 'cached')) {
+        resolvedList.forEach((seg, segIdx) => {
+          const segPath = [...task.path, segIdx];
+          if (seg.type === 'cached') {
+            completedResults.push({ ...seg.hit, path: segPath });
+            completedCount++;
+          } else if (seg.text) {
+            remainingTasks.push({
+              path: segPath,
+              text: seg.text,
+              retries: 0,
+              failedKeys: new Set()
+            });
+          }
+        });
       } else {
         remainingTasks.push(task);
       }
     }
     queue = remainingTasks;
+    initialTotal = Math.max(initialTotal, completedCount + queue.length);
   }
 
   // Maximum concurrent tasks: min(workers.length, 6)
@@ -255,7 +280,18 @@ async function dispatchPoolTTS({
     message: `🎙️ ${completedCount}/${initialTotal} хэсэг бэлэн. Үлдсэн ${queue.length} хэсгийг ${workers.length} түлхүүрээр уншуулна...`
   });
 
-  const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+  const sleep = (ms) => new Promise((res) => {
+    if (controller.signal.aborted) return res();
+    const timer = setTimeout(() => {
+      controller.signal.removeEventListener('abort', onSleepAbort);
+      res();
+    }, ms);
+    const onSleepAbort = () => {
+      clearTimeout(timer);
+      res();
+    };
+    controller.signal.addEventListener('abort', onSleepAbort, { once: true });
+  });
 
   function getModelCreditMultiplier(mId) {
     const m = String(mId || '').toLowerCase();
@@ -297,9 +333,28 @@ async function dispatchPoolTTS({
     return null;
   }
 
+  function enqueueSplitSubtasks(task, splitPair) {
+    const [part1, part2] = splitPair;
+    cache?.writeSplit?.(task.text, splitPair);
+    const subTask1 = {
+      path: [...task.path, 0],
+      text: part1,
+      retries: 0,
+      failedKeys: new Set(task.failedKeys)
+    };
+    const subTask2 = {
+      path: [...task.path, 1],
+      text: part2,
+      retries: 0,
+      failedKeys: new Set()
+    };
+    queue.unshift(subTask2);
+    queue.unshift(subTask1);
+  }
+
   // Worker loop
   async function runWorker() {
-    while (!fatalError) {
+    while (!fatalError && !controller.signal.aborted) {
       if (queue.length === 0) {
         // If queue is empty, wait briefly if any worker is still actively synthesizing,
         // in case an active worker fails and re-queues, or a sub-chunk is split
@@ -315,7 +370,7 @@ async function dispatchPoolTTS({
       let worker = getAvailableWorker(task);
 
       // If worker not immediately available, handle busy / fragmented credits / tier limits
-      while (!worker && !fatalError) {
+      while (!worker && !fatalError && !controller.signal.aborted) {
         const now = Date.now();
         const usableWorkers = workers.filter((w) => !w.exhausted && w.remaining > 0);
 
@@ -339,21 +394,7 @@ async function dispatchPoolTTS({
           if (task.text.length > maxIdleAllowed && maxIdleAllowed >= 20) {
             const splitPair = splitTaskAtBoundary(task.text, Math.max(15, maxIdleAllowed - 5));
             if (splitPair) {
-              const [part1, part2] = splitPair;
-              const subTask1 = {
-                path: [...task.path, 0],
-                text: part1,
-                retries: 0,
-                failedKeys: new Set(task.failedKeys)
-              };
-              const subTask2 = {
-                path: [...task.path, 1],
-                text: part2,
-                retries: 0,
-                failedKeys: new Set()
-              };
-              queue.unshift(subTask2);
-              queue.unshift(subTask1);
+              enqueueSplitSubtasks(task, splitPair);
               break; // Outer loop will shift subTask1
             }
           }
@@ -384,21 +425,7 @@ async function dispatchPoolTTS({
           if (maxOverall >= 20) {
             const splitPair = splitTaskAtBoundary(task.text, Math.max(15, maxOverall - 5));
             if (splitPair) {
-              const [part1, part2] = splitPair;
-              const subTask1 = {
-                path: [...task.path, 0],
-                text: part1,
-                retries: 0,
-                failedKeys: new Set(task.failedKeys)
-              };
-              const subTask2 = {
-                path: [...task.path, 1],
-                text: part2,
-                retries: 0,
-                failedKeys: new Set()
-              };
-              queue.unshift(subTask2);
-              queue.unshift(subTask1);
+              enqueueSplitSubtasks(task, splitPair);
               break;
             }
           }
@@ -515,18 +542,35 @@ async function dispatchPoolTTS({
         });
       } catch (err) {
         worker.busy = false;
-        if (fatalError) return;
+        if (fatalError || controller.signal.aborted) return;
         const causeStr = err.cause?.message || err.cause?.code || '';
         const errMsg = causeStr ? `${err.message} (${causeStr})` : String(err.message || err);
         const kind = classifyError(err);
         task.retries++;
 
-        if (kind === 'terminal') {
-          settings.updateKeyPoolQuota(worker.id, null, err.code === 'detected_unusual_activity' ? 'blocked' : 'error');
+        if (kind === 'key_terminal') {
+          lastQuotaError = `${worker.label}: ${errMsg}`;
+          worker.exhausted = true;
+          worker.remaining = 0;
+          if (worker.quota) worker.quota.remaining = 0;
+          const nextBadStatus = (err.code === 'detected_unusual_activity' || err.code === 'payment_issue' || /payment_issue|unusual_activity|blocked|banned/i.test(errMsg))
+            ? 'blocked'
+            : 'error';
+          settings.updateKeyPoolQuota(worker.id, worker.quota, nextBadStatus);
+          task.failedKeys.add(worker.id);
+          const hasBackupWorker = workers.some((w) => !w.exhausted && w.remaining > 0);
+          if (!hasBackupWorker) {
+            throw new Error(`${worker.label}: ${errMsg}\nБусад идэвхтэй түлхүүр үлдсэнгүй. API-ийн тохиргоог шалгана уу.`);
+          }
+          onProgress?.({
+            stage: 'pool-chunk-failover',
+            keyLabel: worker.label,
+            message: `⚠️ ${worker.label} алдаатай (${errMsg.slice(0, 75)}). Алгасаад дараагийн түлхүүр рүү шилжүүлж байна...`
+          });
+        } else if (kind === 'terminal') {
+          settings.updateKeyPoolQuota(worker.id, null, 'error');
           throw new Error(`${worker.label}: ${errMsg}\nAPI-ийн тохиргоог шалгана уу.`);
-        }
-
-        if (kind === 'rate') {
+        } else if (kind === 'rate') {
           worker.cooldownUntil = Date.now() + Math.max(25000, Math.min(err.retryAfterMs || 0, 120000));
           task.failedKeys.add(worker.id);
           onProgress?.({
@@ -580,7 +624,14 @@ async function dispatchPoolTTS({
     );
   }
 
-  await Promise.all(runnerPromises);
+  try {
+    await Promise.all(runnerPromises);
+  } finally {
+    if (signal) signal.removeEventListener('abort', onExternalAbort);
+  }
+  if (signal?.aborted) {
+    throw Object.assign(new Error('Хэрэглэгч зогсоолоо.'), { name: 'AbortError' });
+  }
   if (fatalError) {
     if (cache) {
       fatalError.message += `\n${completedCount}/${initialTotal} хэсэг хадгалагдсан. Дахин эхлүүлэхэд бэлэн хэсгүүдийг дахин уншуулахгүй.`;

@@ -3,6 +3,7 @@ import { useEditor } from '../store';
 import { Icon } from '../Icons';
 import { formatTime } from '../util';
 import { clipDuration, clipEnd } from '../types';
+import { estimateExportSizeBytes } from '../utils/exportEstimate';
 
 export interface ExportOptions {
   name: string;
@@ -172,31 +173,16 @@ export default function ExportDialog({
 
   // --- Estimated File Size Calculation ---
   const estimatedSizeText = useMemo(() => {
-    let vKbps = 0;
-    if (exportVideo) {
-      if (bitrateOption === 'custom') {
-        vKbps = Number(customBitrate) || 1000;
-      } else {
-        const base = resolution === '480P' ? 2000 : (resolution === '720P' ? 4000 : (resolution === '1080P' ? 8000 : (resolution === '2K' ? 14000 : 28000)));
-        const fpsMultiplier = (fps || 30) / 30;
-        const qualityMultiplier = bitrateOption === 'higher' ? 1.5 : (bitrateOption === 'lower' ? 0.6 : 1.0);
-        vKbps = Math.round(base * fpsMultiplier * qualityMultiplier);
-      }
-    }
-
-    let aKbps = 0;
-    if (exportAudio) {
-      aKbps = parseInt(audioBitrate) || 192;
-    }
-
-    const totalKbps = vKbps + aKbps;
-    const totalBytes = (totalKbps * 1000 / 8) * activeDuration;
-    const mb = totalBytes / (1024 * 1024);
-
-    if (mb >= 1024) {
-      return `${(mb / 1024).toFixed(1)} GB`;
-    }
-    return `${Math.max(1, Math.round(mb))} MB`;
+    return estimateExportSizeBytes({
+      exportVideo,
+      exportAudio,
+      bitrateOption,
+      customBitrate,
+      resolution,
+      fps,
+      audioBitrate,
+      durationSec: activeDuration
+    }).formatted.replace(/\.00 GB$/, '.0 GB');
   }, [exportVideo, exportAudio, bitrateOption, customBitrate, resolution, fps, audioBitrate, activeDuration]);
 
   // --- Formatted Duration (e.g. 19m 57s) ---

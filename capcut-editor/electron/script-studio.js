@@ -95,7 +95,9 @@ async function buildScriptRecap(spec, progress) {
     audioOnly = false,
     useVision = false, // Rule 1: false by default
     panelPacing = 'auto',
-    chunkSize = 9000
+    chunkSize = 9000,
+    outDir = '',
+    signal = null
   } = spec;
 
   const isAudioOnly = Boolean(audioOnly || mode === 'audio_only' || !videoPath);
@@ -143,10 +145,13 @@ function getDownloadsDir() {
 }
 
   // 1. Synthesize audio via ElevenLabs Multi-Key Dispatcher in smart adaptive chunks (default 9000 chars, max 10000)
+  if (signal?.aborted) {
+    throw Object.assign(new Error('Хэрэглэгч зогсоолоо.'), { name: 'AbortError' });
+  }
   const targetChunkSize = Math.max(500, Math.min(10000, Number(chunkSize) || 9000));
   const scriptChunks = splitScriptIntoChunks(cleanScript, targetChunkSize);
   const downloadsDir = getDownloadsDir();
-  const audioDir = path.join(downloadsDir, 'Cutline Audio');
+  const audioDir = outDir ? path.resolve(String(outDir)) : path.join(downloadsDir, 'Cutline Audio');
   fs.mkdirSync(audioDir, { recursive: true });
   const audioFile = path.join(audioDir, `voice_master_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.mp3`);
 
@@ -166,6 +171,7 @@ function getDownloadsDir() {
     speed,
     outDir: audioDir,
     resume: true,
+    signal,
     onProgress: (p) => {
       progress?.({
         stage: 'tts',
@@ -202,11 +208,13 @@ function getDownloadsDir() {
   }
   await ff.concatAudioFiles(partFiles, audioFile);
 
-  // Also make master audio instantly accessible directly in Downloads folder
-  try {
-    const directDl = path.join(downloadsDir, path.basename(audioFile));
-    fs.copyFileSync(audioFile, directDl);
-  } catch {}
+  // Also make master audio instantly accessible directly in Downloads folder (default mode)
+  if (!outDir) {
+    try {
+      const directDl = path.join(downloadsDir, path.basename(audioFile));
+      fs.copyFileSync(audioFile, directDl);
+    } catch {}
+  }
 
   const audioProbe = await ff.probe(audioFile);
   const voiceDuration = audioProbe.duration || cumulativeTimeOffset;

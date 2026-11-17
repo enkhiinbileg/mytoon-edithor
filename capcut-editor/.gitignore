@@ -1,4 +1,5 @@
 node_modules/
+.venv-safe-recap/
 dist/
 release/
 .test-output/
